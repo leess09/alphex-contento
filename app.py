@@ -325,7 +325,36 @@ def fetch_market_news(query: str = "", count: int = 10):
             except Exception:
                 continue
 
-    # 2순위: CNBC RSS — 키워드로 필터링
+    # 2순위: Google News RSS — 키워드 검색에 가장 신뢰도 높음
+    if not results and query:
+        try:
+            import urllib.parse
+            q_encoded = urllib.parse.quote(f"{query} finance")
+            gn_url = f"https://news.google.com/rss/search?q={q_encoded}&hl=en-US&gl=US&ceid=US:en"
+            r = requests.get(gn_url, timeout=15, headers=headers)
+            if r.status_code == 200:
+                root = ET.fromstring(r.content)
+                for item in root.findall(".//item"):
+                    title = clean(item.findtext("title", ""))
+                    desc = clean(item.findtext("description", ""))
+                    pub = item.findtext("pubDate", "")[:16]
+                    link = item.findtext("link", "")
+                    source_el = item.find("{https://news.google.com/rss}source")
+                    source = source_el.text if source_el is not None else "Google News"
+                    if title and title not in [x["title"] for x in results]:
+                        results.append({
+                            "title": title,
+                            "text": desc,
+                            "publishedDate": pub,
+                            "source": source,
+                            "url": link,
+                        })
+                        if len(results) >= count:
+                            break
+        except Exception:
+            pass
+
+    # 3순위: CNBC RSS — 쿼리 없을 때 또는 위 소스 모두 실패 시 헤드라인 표시
     if not results:
         cnbc_feeds = [
             ("https://www.cnbc.com/id/100003114/device/rss/rss.html", "CNBC Markets"),
@@ -353,12 +382,7 @@ def fetch_market_news(query: str = "", count: int = 10):
                             })
             except Exception:
                 continue
-
-        if query:
-            kw = query.lower()
-            results = [n for n in raw if kw in n["title"].lower() or kw in n["text"].lower()]
-        else:
-            results = raw
+        results = raw
 
     return results[:count]
 
@@ -1013,19 +1037,83 @@ with tab_daily:
     # ── STEP 1 · 데이터 수집 ──────────────────────────────
     section_header(1, "미국 뉴스 & 어닝 일정 수집", active=True)
 
+    # ── A. 미국 시장 이슈 검색 (항상 최상단 표시) ─────────
+    st.markdown(
+        '<div style="color:#00E676;font-weight:700;font-size:14px;margin:0 0 6px;">📈 미국 시장 이슈 검색</div>',
+        unsafe_allow_html=True,
+    )
+    mkt_col1, mkt_col2 = st.columns([5, 1])
+    with mkt_col1:
+        mkt_query = st.text_input(
+            "시장 이슈 검색",
+            value=st.session_state.daily_market_query,
+            placeholder="예: oil price, Fed rate hike, AI stocks, China tariff ...",
+            label_visibility="collapsed",
+            key="mkt_query_input",
+        )
+    with mkt_col2:
+        search_clicked = st.button("🔍 검색", key="btn_mkt_search")
+
+    if search_clicked and mkt_query.strip():
+        st.session_state.daily_market_query = mkt_query
+        with st.spinner(f"'{mkt_query}' 관련 뉴스를 검색 중..."):
+            st.session_state.daily_market_news = fetch_market_news(mkt_query, 10)
+            st.session_state.daily_selected_news = []
+        if st.session_state.daily_market_news:
+            st.success(f"✅ {len(st.session_state.daily_market_news)}건 검색 완료!")
+        else:
+            st.warning("관련 뉴스를 찾지 못했습니다. 다른 키워드로 검색해보세요.")
+
+    # ── 검색한 뉴스 내용 표시 ─────────────────────────────
+    if st.session_state.daily_market_news:
+        st.markdown(
+            f'<div style="color:#8B949E;font-size:11px;margin-bottom:8px;">검색어: <b style="color:#00E676;">{st.session_state.daily_market_query}</b> — 영상에 넣을 뉴스를 선택하세요</div>',
+            unsafe_allow_html=True,
+        )
+        for i, news in enumerate(st.session_state.daily_market_news):
+            chk_col, content_col = st.columns([1, 14])
+            with chk_col:
+                st.checkbox("", key=f"mn_{i}", label_visibility="collapsed")
+            with content_col:
+                pub = news.get("publishedDate", "")[:10]
+                source = news.get("source", "")
+                label = f"{news['title'][:75]}{'...' if len(news['title'])>75 else ''}"
+                with st.expander(label):
+                    st.markdown(
+                        f'<div style="color:#C9D1D9;font-size:13px;line-height:1.7;">{news.get("text","내용 없음")}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(f"🕐 {pub}  |  출처: {source}")
+                    if news.get("url"):
+                        st.markdown(f"[🔗 원문 보기]({news.get('url')})")
+
+    # 선택된 시장 뉴스 session state 저장
+    selected_market = [
+        st.session_state.daily_market_news[i]
+        for i in range(len(st.session_state.daily_market_news))
+        if st.session_state.get(f"mn_{i}", False)
+    ]
+    st.session_state.daily_selected_news = selected_market
+
+    # ── 관심 종목 티커 ────────────────────────────────────
+    st.markdown(
+        '<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">📡 관심 종목 티커</div>',
+        unsafe_allow_html=True,
+    )
     c1, c2, c3 = st.columns([3, 1, 1])
     with c1:
         tickers = st.text_input(
             "관심 종목 티커",
             placeholder="AAPL, NVDA, TSLA, META  (쉼표로 구분)",
             help="분석할 미국 주식 티커를 입력하세요",
+            label_visibility="collapsed",
         )
     with c2:
         news_count = st.selectbox("뉴스 수량", [5, 10, 15, 20], index=1)
     with c3:
         data_source = st.selectbox("데이터 소스", ["FMP + RSS", "FMP Only", "RSS Only"])
 
-    if st.button("📡  Step 1 · 뉴스 & 어닝 데이터 수집 시작", key="btn_d_collect"):
+    if st.button("📡  Step 1 · 종목 뉴스 & 어닝 수집 시작", key="btn_d_collect"):
         if not tickers.strip():
             st.warning("⚠️ 종목 티커를 입력해주세요. (예: AAPL, NVDA)")
         else:
@@ -1038,70 +1126,12 @@ with tab_daily:
             else:
                 st.session_state.daily_news_data = news_data
                 st.session_state.daily_earnings_data = earnings_data
-                st.session_state.daily_selected_news = []
                 st.session_state.daily_news_done = True
                 st.session_state.daily_step = max(st.session_state.daily_step, 2)
                 st.success(f"✅ 종목 뉴스 {len(news_data)}건, 어닝 {len(earnings_data)}건 수집 완료!")
 
+    # ── 종목별 뉴스 내용 (수집 완료 후 표시) ──────────────
     if st.session_state.daily_news_done:
-
-        # ── A. 미국 시장 이슈 검색 ────────────────────────
-        st.markdown(
-            '<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">📈 미국 시장 이슈 검색</div>',
-            unsafe_allow_html=True,
-        )
-        mkt_col1, mkt_col2 = st.columns([5, 1])
-        with mkt_col1:
-            mkt_query = st.text_input(
-                "시장 이슈 검색",
-                value=st.session_state.daily_market_query,
-                placeholder="예: oil price, Fed rate hike, AI stocks, China tariff ...",
-                label_visibility="collapsed",
-                key="mkt_query_input",
-            )
-        with mkt_col2:
-            search_clicked = st.button("🔍 검색", key="btn_mkt_search")
-
-        if search_clicked and mkt_query.strip():
-            st.session_state.daily_market_query = mkt_query
-            with st.spinner(f"'{mkt_query}' 관련 뉴스를 검색 중..."):
-                st.session_state.daily_market_news = fetch_market_news(mkt_query, 10)
-                st.session_state.daily_selected_news = []
-            if st.session_state.daily_market_news:
-                st.success(f"✅ {len(st.session_state.daily_market_news)}건 검색 완료!")
-            else:
-                st.warning("관련 뉴스를 찾지 못했습니다. 다른 키워드로 검색해보세요.")
-
-        if st.session_state.daily_market_news:
-            st.markdown(
-                f'<div style="color:#8B949E;font-size:11px;margin-bottom:8px;">검색어: <b style="color:#00E676;">{st.session_state.daily_market_query}</b> — 영상에 넣을 뉴스를 선택하세요</div>',
-                unsafe_allow_html=True,
-            )
-            for i, news in enumerate(st.session_state.daily_market_news):
-                chk_col, content_col = st.columns([1, 14])
-                with chk_col:
-                    st.checkbox("", key=f"mn_{i}", label_visibility="collapsed")
-                with content_col:
-                    pub = news.get("publishedDate", "")[:10]
-                    source = news.get("source", "")
-                    label = f"{news['title'][:75]}{'...' if len(news['title'])>75 else ''}"
-                    with st.expander(label):
-                        st.markdown(
-                            f'<div style="color:#C9D1D9;font-size:13px;line-height:1.7;">{news.get("text","내용 없음")}</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.caption(f"🕐 {pub}  |  출처: {source}")
-                        if news.get("url"):
-                            st.markdown(f"[🔗 원문 보기]({news.get('url')})")
-
-        # 선택된 시장 뉴스 저장
-        selected_market = [
-            st.session_state.daily_market_news[i]
-            for i in range(len(st.session_state.daily_market_news))
-            if st.session_state.get(f"mn_{i}", False)
-        ]
-
-        # ── B. 종목별 뉴스 (클릭해서 내용 읽기) ──────────
         st.markdown(
             f'<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">📊 종목별 뉴스 ({len(st.session_state.daily_news_data)}건) — 클릭해서 내용 확인</div>',
             unsafe_allow_html=True,
@@ -1111,7 +1141,6 @@ with tab_daily:
                 ticker_tag = n.get("symbol", "")
                 tickers_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
                 is_relevant = any(t in n.get("title", "").upper() for t in tickers_list)
-                badge = ' <span style="background:#00E676;color:#0E1117;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;">AI 추천</span>' if is_relevant else ""
                 label = f"[{ticker_tag}] {n.get('title','')[:70]}{'...' if len(n.get('title',''))>70 else ''}"
                 with st.expander(label):
                     if n.get("text") or n.get("description"):
@@ -1125,7 +1154,7 @@ with tab_daily:
         else:
             st.caption("수집된 종목 뉴스가 없습니다.")
 
-        # ── C. 어닝 캘린더 + 수동 입력 ────────────────────
+        # 어닝 캘린더 + 수동 입력
         with st.expander("📅 어닝 컨퍼런스 콜 일정", expanded=True):
             if st.session_state.daily_earnings_data:
                 for e in st.session_state.daily_earnings_data:
@@ -1147,40 +1176,37 @@ with tab_daily:
             )
             st.session_state.daily_manual_earning = manual
 
-        # 선택 뉴스 session state 업데이트
-        st.session_state.daily_selected_news = selected_market
+    # ── 참고 YouTube 영상 (항상 표시) ─────────────────────
+    st.markdown(
+        '<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">🎥 참고 YouTube 영상 (선택)</div>',
+        unsafe_allow_html=True,
+    )
+    info_box("다른 유튜버 영상 URL을 붙여넣으면 내용을 분석해서 나만의 대본에 참고합니다.", "#7B68EE")
 
-        # ── D. 참고 YouTube 영상 ────────────────────────────
-        st.markdown(
-            '<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">🎥 참고 YouTube 영상 (선택)</div>',
-            unsafe_allow_html=True,
+    yt_col1, yt_col2 = st.columns([5, 1])
+    with yt_col1:
+        yt_url = st.text_input(
+            "YouTube URL",
+            value=st.session_state.daily_youtube_url,
+            placeholder="https://www.youtube.com/watch?v=...",
+            label_visibility="collapsed",
+            key="yt_url_input",
         )
-        info_box("다른 유튜버 영상 URL을 붙여넣으면 내용을 분석해서 나만의 대본에 참고합니다.", "#7B68EE")
+        st.session_state.daily_youtube_url = yt_url
+    with yt_col2:
+        if st.button("📥 분석", key="btn_yt_fetch"):
+            if yt_url:
+                with st.spinner("자막 추출 중..."):
+                    transcript, err = fetch_youtube_transcript(yt_url)
+                if err:
+                    st.error(f"❌ {err}")
+                else:
+                    st.session_state.daily_youtube_transcript = transcript
+                    st.success("✅ 자막 추출 완료!")
 
-        yt_col1, yt_col2 = st.columns([5, 1])
-        with yt_col1:
-            yt_url = st.text_input(
-                "YouTube URL",
-                value=st.session_state.daily_youtube_url,
-                placeholder="https://www.youtube.com/watch?v=...",
-                label_visibility="collapsed",
-                key="yt_url_input",
-            )
-            st.session_state.daily_youtube_url = yt_url
-        with yt_col2:
-            if st.button("📥 분석", key="btn_yt_fetch"):
-                if yt_url:
-                    with st.spinner("자막 추출 중..."):
-                        transcript, err = fetch_youtube_transcript(yt_url)
-                    if err:
-                        st.error(f"❌ {err}")
-                    else:
-                        st.session_state.daily_youtube_transcript = transcript
-                        st.success("✅ 자막 추출 완료!")
-
-        if st.session_state.daily_youtube_transcript:
-            with st.expander("📝 추출된 자막 미리보기", expanded=False):
-                st.text(st.session_state.daily_youtube_transcript[:800] + "...")
+    if st.session_state.daily_youtube_transcript:
+        with st.expander("📝 추출된 자막 미리보기", expanded=False):
+            st.text(st.session_state.daily_youtube_transcript[:800] + "...")
 
     divider()
 
