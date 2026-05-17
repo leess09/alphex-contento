@@ -1,9 +1,11 @@
 """
 Alphex Contento — AI 마케팅 영상 자동 제작 파이프라인
-Streamlit 메인 대시보드 (UI 레이아웃)
+Streamlit 메인 대시보드
 """
 
 import streamlit as st
+import anthropic
+import requests
 from datetime import datetime
 import time
 
@@ -25,18 +27,14 @@ st.markdown(
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&display=swap');
 
-/* ── 글로벌 ── */
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-
 .stApp { background-color: #0E1117; }
 
-/* ── 사이드바 ── */
 section[data-testid="stSidebar"] {
     background-color: #0D1117 !important;
     border-right: 1px solid #21262D;
 }
 
-/* ── 버튼 ── */
 div.stButton > button {
     background: linear-gradient(135deg, #00E676, #00C853);
     color: #0E1117 !important;
@@ -54,7 +52,6 @@ div.stButton > button:hover {
     box-shadow: 0 4px 20px rgba(0, 230, 118, 0.35);
 }
 
-/* ── 탭 ── */
 div[data-baseweb="tab-list"] {
     background-color: #161B22;
     border-radius: 10px;
@@ -74,7 +71,6 @@ button[data-baseweb="tab"][aria-selected="true"] {
     color: #00E676 !important;
 }
 
-/* ── 입력 필드 ── */
 div[data-baseweb="input"] input,
 div[data-baseweb="textarea"] textarea {
     background-color: #161B22 !important;
@@ -88,7 +84,6 @@ div[data-baseweb="textarea"] textarea:focus {
     box-shadow: 0 0 0 2px rgba(0, 230, 118, 0.2) !important;
 }
 
-/* ── 셀렉트 박스 ── */
 div[data-baseweb="select"] > div {
     background-color: #161B22 !important;
     border: 1px solid #30363D !important;
@@ -96,7 +91,6 @@ div[data-baseweb="select"] > div {
     border-radius: 8px !important;
 }
 
-/* ── 메트릭 카드 ── */
 div[data-testid="metric-container"] {
     background-color: #161B22;
     border: 1px solid #21262D;
@@ -110,20 +104,14 @@ div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
     font-weight: 700 !important;
 }
 
-/* ── 파일 업로더 ── */
 div[data-testid="stFileUploader"] {
     background-color: #161B22;
     border: 1px dashed #30363D;
     border-radius: 10px;
 }
 
-/* ── 체크박스 ── */
 div[data-testid="stCheckbox"] label { color: #E6EDF3 !important; }
-
-/* ── 구분선 ── */
 hr { border-color: #21262D !important; }
-
-/* ── 스크롤바 ── */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: #0E1117; }
 ::-webkit-scrollbar-thumb { background: #30363D; border-radius: 3px; }
@@ -134,28 +122,49 @@ hr { border-color: #21262D !important; }
 )
 
 # ══════════════════════════════════════════════════════════
-# 3. 세션 스테이트 초기화
+# 3. 시크릿 로딩 헬퍼
+# ══════════════════════════════════════════════════════════
+def _secret(key, session_fallback=None):
+    try:
+        v = st.secrets.get(key, "")
+        if v:
+            return v
+    except Exception:
+        pass
+    if session_fallback:
+        return st.session_state.get(session_fallback, "")
+    return ""
+
+# ══════════════════════════════════════════════════════════
+# 4. 세션 스테이트 초기화
 # ══════════════════════════════════════════════════════════
 _defaults = {
-    # 파이프라인 단계 (Daily)
     "daily_step": 1,
     "daily_news_done": False,
+    "daily_news_data": [],
+    "daily_earnings_data": [],
     "daily_script_done": False,
-    "daily_voice_done": False,
-    "daily_video_done": False,
     "daily_script_text": "",
-    # 파이프라인 단계 (Weekend)
+    "daily_titles": [],
+    "daily_voice_done": False,
+    "daily_audio_bytes": None,
+    "daily_video_done": False,
+    "daily_video_url": "",
+    "daily_render_id": "",
     "wknd_step": 1,
     "wknd_data_done": False,
+    "wknd_market_data": {},
     "wknd_script_done": False,
+    "wknd_script_text": "",
+    "wknd_titles": [],
     "wknd_voice_done": False,
+    "wknd_audio_bytes": None,
     "wknd_video_done": False,
-    # API 설정
+    "wknd_video_url": "",
     "api_claude": "",
     "api_elevenlabs": "",
     "api_creatomate": "",
     "api_fmp": "",
-    # 페르소나
     "persona_name": "",
     "persona_tone": "주식 예능 (유머+정보 균형)",
 }
@@ -165,11 +174,9 @@ for k, v in _defaults.items():
 
 
 # ══════════════════════════════════════════════════════════
-# 4. 공통 헬퍼 함수
+# 5. UI 헬퍼 함수
 # ══════════════════════════════════════════════════════════
-
 def step_indicator(current: int, total: int = 5) -> None:
-    """상단 5단계 진행 표시기"""
     labels = ["데이터\n수집", "AI 대본\n생성", "보이스\n합성", "영상\n조립", "완성 &\n다운로드"]
     html = '<div style="display:flex;justify-content:center;align-items:center;padding:20px 0 8px;gap:0;">'
     for i in range(total):
@@ -182,7 +189,6 @@ def step_indicator(current: int, total: int = 5) -> None:
             bg, fg, txt, icon = "#00E676", "#0E1117", "#E6EDF3", str(n)
         else:
             bg, fg, txt, icon = "#21262D", "#8B949E", "#8B949E", str(n)
-
         glow = "box-shadow:0 0 14px rgba(0,230,118,0.5);" if active else ""
         html += f"""
         <div style="display:flex;flex-direction:column;align-items:center;min-width:72px;">
@@ -195,13 +201,11 @@ def step_indicator(current: int, total: int = 5) -> None:
         if i < total - 1:
             line_color = "#00E676" if n < current else "#21262D"
             html += f'<div style="flex:1;height:2px;background:{line_color};margin-bottom:24px;min-width:20px;max-width:48px;"></div>'
-
     html += "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
 
 def step_badge(n: int, active: bool = True) -> str:
-    """섹션 제목 앞 번호 배지 HTML"""
     bg = "#00E676" if active else "#21262D"
     fg = "#0E1117" if active else "#8B949E"
     return (
@@ -222,8 +226,8 @@ def section_header(n: int, title: str, active: bool = True) -> None:
     )
 
 
-def api_badge(label: str, key: str, color_ok: str = "#00E676") -> None:
-    connected = bool(st.session_state.get(key))
+def api_badge(label: str, secret_key: str, session_key: str, color_ok: str = "#00E676") -> None:
+    connected = bool(_secret(secret_key, session_key))
     status = "✓ 연결됨" if connected else "⚠ 미설정"
     border = color_ok if connected else "#FFA726"
     color = color_ok if connected else "#FFA726"
@@ -267,10 +271,387 @@ def market_mode() -> tuple[str, str]:
 
 
 # ══════════════════════════════════════════════════════════
-# 5. SIDEBAR
+# 6. API 함수
+# ══════════════════════════════════════════════════════════
+
+# ── FMP: 뉴스 수집 ──────────────────────────────────────
+def fetch_news(tickers_str: str, count: int):
+    api_key = _secret("FMP_API_KEY", "api_fmp")
+    if not api_key:
+        return [], "FMP API 키가 설정되지 않았습니다."
+    tickers = ",".join([t.strip().upper() for t in tickers_str.split(",") if t.strip()])
+    params = {"tickers": tickers, "limit": count, "apikey": api_key}
+    try:
+        r = requests.get(
+            "https://financialmodelingprep.com/api/v3/stock_news",
+            params=params,
+            timeout=15,
+        )
+        if r.status_code == 200:
+            return r.json(), None
+        return [], f"FMP 오류 ({r.status_code}): {r.text[:200]}"
+    except Exception as e:
+        return [], str(e)
+
+
+# ── FMP: 어닝 캘린더 ──────────────────────────────────
+def fetch_earnings(tickers_str: str):
+    api_key = _secret("FMP_API_KEY", "api_fmp")
+    if not api_key:
+        return []
+    tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+    try:
+        r = requests.get(
+            "https://financialmodelingprep.com/api/v3/earning_calendar",
+            params={"apikey": api_key},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if tickers:
+                data = [e for e in data if e.get("symbol") in tickers]
+            return data[:10]
+    except Exception:
+        pass
+    return []
+
+
+# ── FMP: 주간 지수 데이터 ─────────────────────────────
+def fetch_market_indices():
+    api_key = _secret("FMP_API_KEY", "api_fmp")
+    if not api_key:
+        return {}
+    symbols = {"S&P 500": "%5EGSPC", "NASDAQ": "%5EIXIC", "DOW": "%5EDJI", "VIX": "%5EVIX"}
+    result = {}
+    for name, sym in symbols.items():
+        try:
+            r = requests.get(
+                f"https://financialmodelingprep.com/api/v3/quote/{sym}",
+                params={"apikey": api_key},
+                timeout=10,
+            )
+            if r.status_code == 200 and r.json():
+                d = r.json()[0]
+                result[name] = {
+                    "price": d.get("price", 0),
+                    "change": d.get("changesPercentage", 0),
+                }
+        except Exception:
+            pass
+    return result
+
+
+# ── Claude: 대본 파싱 ────────────────────────────────
+def parse_script_response(text: str):
+    titles = []
+    script = text
+    if "== 유튜브 제목 후보 3개 ==" in text and "== 대본 ==" in text:
+        parts = text.split("== 대본 ==")
+        title_section = parts[0]
+        script = parts[1].strip() if len(parts) > 1 else text
+        for line in title_section.split("\n"):
+            line = line.strip()
+            if line and line[0] in "123" and "." in line[:3]:
+                titles.append(line.split(".", 1)[1].strip())
+    return titles, script
+
+
+# ── Claude: 평일 대본 생성 ───────────────────────────
+def generate_daily_script(news_data, earnings_data, user_comment, video_type, tone_style):
+    api_key = _secret("CLAUDE_API_KEY", "api_claude")
+    if not api_key:
+        return None, None, "Claude API 키가 설정되지 않았습니다."
+
+    news_lines = "\n".join(
+        [f"• [{n.get('symbol','')}] {n.get('title','')}" for n in news_data[:7]]
+    ) or "수집된 뉴스 없음"
+
+    earnings_lines = "\n".join(
+        [
+            f"• {e.get('symbol','')} — 발표일: {e.get('date','')}  EPS 예상: ${e.get('epsEstimated','N/A')}"
+            for e in earnings_data[:5]
+        ]
+    ) or "어닝 일정 없음"
+
+    length_map = {
+        "숏폼 (60초 이하)": "600자 이내, 임팩트 있게 짧고 강렬하게",
+        "미드폼 (3–5분)": "1500자 내외, 자세하게",
+        "롱폼 (10분 이상)": "3000자 이상, 심층 분석 포함",
+    }
+    tone_map = {
+        "주식 예능 (유머+정보)": "재미있고 유머러스하게, 쉬운 말로",
+        "진지한 심층 분석": "전문적이고 신뢰감 있게",
+        "동기부여 멘토형": "따뜻하고 격려하는 톤으로",
+    }
+
+    prompt = f"""당신은 한국 주식 유튜브 채널 'Alphex Contento'의 AI 대본 작가입니다.
+
+[오늘의 미국 주식 뉴스]
+{news_lines}
+
+[오늘 어닝 발표 일정]
+{earnings_lines}
+
+[운영자 한마디]
+{user_comment if user_comment else "없음"}
+
+[영상 타입] {video_type} — {length_map.get(video_type, "")}
+[톤앤매너] {tone_style} — {tone_map.get(tone_style, "")}
+
+아래 형식으로 한국어 대본을 작성해주세요:
+
+== 유튜브 제목 후보 3개 ==
+1. (후킹 제목1)
+2. (후킹 제목2)
+3. (후킹 제목3)
+
+== 대본 ==
+[오프닝 — 시청자를 즉시 사로잡는 후킹 멘트]
+
+[뉴스 핵심 3가지 요약]
+
+[어닝 발표 하이라이트]
+
+[운영자 코멘트]
+
+[마무리 & 구독/좋아요 CTA]
+
+실제 방송에서 읽을 수 있는 자연스러운 구어체로 작성하세요."""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-opus-4-7",
+            max_tokens=3000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text
+        titles, script = parse_script_response(raw)
+        return titles, script, None
+    except Exception as e:
+        return None, None, str(e)
+
+
+# ── Claude: 주말 대본 생성 ───────────────────────────
+def generate_weekend_script(market_data, legend, insight_theme, user_comment):
+    api_key = _secret("CLAUDE_API_KEY", "api_claude")
+    if not api_key:
+        return None, None, "Claude API 키가 설정되지 않았습니다."
+
+    market_lines = "\n".join(
+        [
+            f"• {name}: {d.get('price', 0):,.2f} ({d.get('change', 0):+.2f}%)"
+            for name, d in market_data.items()
+        ]
+    ) or "시장 데이터 없음"
+
+    prompt = f"""당신은 한국 주식 유튜브 채널 'Alphex Contento'의 AI 대본 작가입니다.
+
+[이번 주 미국 주요 지수]
+{market_lines}
+
+[이번 주 주인공 투자 대가] {legend}
+[인사이트 테마] {insight_theme}
+[운영자 한마디] {user_comment if user_comment else "없음"}
+
+아래 형식으로 주말 스페셜 롱폼 대본(2000자 이상)을 작성해주세요:
+
+== 유튜브 제목 후보 3개 ==
+1. (후킹 제목1)
+2. (후킹 제목2)
+3. (후킹 제목3)
+
+== 대본 ==
+[오프닝 — 이번 주 시장 한 줄 요약]
+
+[이번 주 주요 지수 리뷰]
+
+[{legend}의 명언 & 현재 시장 적용]
+
+[다음 주 주목할 포인트]
+
+[운영자 코멘트]
+
+[마무리 & 구독 CTA]
+
+구어체, 동기부여 톤으로 작성하세요."""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-opus-4-7",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text
+        titles, script = parse_script_response(raw)
+        return titles, script, None
+    except Exception as e:
+        return None, None, str(e)
+
+
+# ── ElevenLabs: 음성 합성 ─────────────────────────────
+VOICE_IDS = {
+    "남성 · 전문 애널리스트형": "pNInz6obpgDQGcFmaJgB",
+    "남성 · 에너지 넘치는 예능형": "ErXwobaYiN019PkySvjV",
+    "여성 · 차분한 해설형": "21m00Tcm4TlvDq8ikWAM",
+    "여성 · 활기찬 진행형": "EXAVITQu4vr4xnSDxMaL",
+}
+
+
+def synthesize_voice(text: str, voice_persona: str):
+    api_key = _secret("ELEVENLABS_API_KEY", "api_elevenlabs")
+    if not api_key:
+        return None, "ElevenLabs API 키가 설정되지 않았습니다."
+
+    voice_id = VOICE_IDS.get(voice_persona, "pNInz6obpgDQGcFmaJgB")
+    text_to_speak = text[:2500]
+
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": api_key,
+    }
+    payload = {
+        "text": text_to_speak,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+    }
+
+    try:
+        r = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            json=payload,
+            headers=headers,
+            timeout=90,
+        )
+        if r.status_code == 200:
+            return r.content, None
+        try:
+            detail = r.json().get("detail", {})
+            msg = detail.get("message", r.text[:300]) if isinstance(detail, dict) else str(detail)
+        except Exception:
+            msg = r.text[:300]
+        return None, f"ElevenLabs 오류: {msg}"
+    except Exception as e:
+        return None, str(e)
+
+
+# ── Creatomate: 영상 렌더링 ───────────────────────────
+def create_video_render(title: str, script_excerpt: str, ratio_option: str):
+    api_key = _secret("CREATOMATE_API_KEY", "api_creatomate")
+    if not api_key:
+        return None, "Creatomate API 키가 설정되지 않았습니다."
+
+    if "9:16" in ratio_option:
+        width, height = 1080, 1920
+    elif "16:9" in ratio_option:
+        width, height = 1920, 1080
+    else:
+        width, height = 1080, 1080
+
+    source = {
+        "output_format": "mp4",
+        "duration": 30,
+        "width": width,
+        "height": height,
+        "fill_color": "#0E1117",
+        "elements": [
+            {
+                "type": "text",
+                "text": "⬡ ALPHEX CONTENTO",
+                "x": "50%",
+                "y": "8%",
+                "width": "90%",
+                "x_alignment": "50%",
+                "font_family": "Noto Sans KR",
+                "font_size": "4 vmin",
+                "fill_color": "#00E676",
+                "font_weight": "700",
+            },
+            {
+                "type": "text",
+                "text": title[:80],
+                "x": "50%",
+                "y": "28%",
+                "width": "88%",
+                "x_alignment": "50%",
+                "font_family": "Noto Sans KR",
+                "font_size": "5.5 vmin",
+                "fill_color": "#E6EDF3",
+                "font_weight": "700",
+                "line_height": "140%",
+            },
+            {
+                "type": "text",
+                "text": script_excerpt[:400],
+                "x": "50%",
+                "y": "60%",
+                "width": "84%",
+                "height": "30%",
+                "x_alignment": "50%",
+                "y_alignment": "50%",
+                "font_family": "Noto Sans KR",
+                "font_size": "3 vmin",
+                "fill_color": "#8B949E",
+                "line_height": "160%",
+            },
+            {
+                "type": "text",
+                "text": "본 영상은 투자 권유가 아닌 정보 제공 목적입니다.",
+                "x": "50%",
+                "y": "95%",
+                "width": "90%",
+                "x_alignment": "50%",
+                "font_family": "Noto Sans KR",
+                "font_size": "2 vmin",
+                "fill_color": "#30363D",
+            },
+        ],
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        r = requests.post(
+            "https://api.creatomate.com/v1/renders",
+            json={"source": source},
+            headers=headers,
+            timeout=30,
+        )
+        if r.status_code == 202:
+            return r.json()[0]["id"], None
+        return None, f"Creatomate 오류 ({r.status_code}): {r.text[:300]}"
+    except Exception as e:
+        return None, str(e)
+
+
+def poll_render(render_id: str):
+    api_key = _secret("CREATOMATE_API_KEY", "api_creatomate")
+    if not api_key:
+        return None, None
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        r = requests.get(
+            f"https://api.creatomate.com/v1/renders/{render_id}",
+            headers=headers,
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("status"), data.get("url")
+    except Exception:
+        pass
+    return None, None
+
+
+# ══════════════════════════════════════════════════════════
+# 7. SIDEBAR
 # ══════════════════════════════════════════════════════════
 with st.sidebar:
-    # ── 로고 ──────────────────────────────────────────────
     st.markdown(
         """
     <div style="text-align:center;padding:22px 0 14px;">
@@ -283,7 +664,6 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    # ── 시장 상태 위젯 ────────────────────────────────────
     mode_label, mode_color = market_mode()
     emoji, text = mode_label.split(" ", 1)
     st.markdown(
@@ -299,19 +679,17 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    # ── API 크레딧 잔여량 ─────────────────────────────────
     st.markdown(
         '<div style="color:#E6EDF3;font-size:13px;font-weight:600;margin-bottom:4px;">API 연결 상태</div>',
         unsafe_allow_html=True,
     )
-    api_badge("Claude API (Anthropic)", "api_claude")
-    api_badge("ElevenLabs TTS", "api_elevenlabs")
-    api_badge("Creatomate 렌더링", "api_creatomate")
-    api_badge("FMP 금융 데이터", "api_fmp")
+    api_badge("Claude API (Anthropic)", "CLAUDE_API_KEY", "api_claude")
+    api_badge("ElevenLabs TTS", "ELEVENLABS_API_KEY", "api_elevenlabs")
+    api_badge("Creatomate 렌더링", "CREATOMATE_API_KEY", "api_creatomate")
+    api_badge("FMP 금융 데이터", "FMP_API_KEY", "api_fmp")
 
     divider()
 
-    # ── 월간 제작 현황 ────────────────────────────────────
     st.markdown(
         '<div style="color:#E6EDF3;font-size:13px;font-weight:600;margin-bottom:8px;">이번 달 제작 현황</div>',
         unsafe_allow_html=True,
@@ -323,11 +701,11 @@ with st.sidebar:
         st.metric("잔여 한도", "18개")
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.info("💡 시작 전 **⚙️ 설정** 탭에서 API 키를 먼저 입력해주세요.")
+    st.info("💡 시작 전 **⚙️ 설정** 탭에서 API 키를 확인해주세요.")
 
 
 # ══════════════════════════════════════════════════════════
-# 6. 메인 헤더
+# 8. 메인 헤더
 # ══════════════════════════════════════════════════════════
 st.markdown(
     """
@@ -344,7 +722,7 @@ st.markdown(
 )
 
 # ══════════════════════════════════════════════════════════
-# 7. 탭 구성
+# 9. 탭 구성
 # ══════════════════════════════════════════════════════════
 tab_daily, tab_weekend, tab_settings = st.tabs(
     [
@@ -379,26 +757,47 @@ with tab_daily:
         data_source = st.selectbox("데이터 소스", ["FMP + RSS", "FMP Only", "RSS Only"])
 
     if st.button("📡  Step 1 · 뉴스 & 어닝 데이터 수집 시작", key="btn_d_collect"):
-        with st.spinner("미국 증시 데이터를 수집하는 중..."):
-            time.sleep(1.5)
-        st.session_state.daily_news_done = True
-        st.session_state.daily_step = max(st.session_state.daily_step, 2)
-        st.success("✅ 데이터 수집 완료!")
+        if not tickers.strip():
+            st.warning("⚠️ 종목 티커를 입력해주세요. (예: AAPL, NVDA)")
+        else:
+            with st.spinner("미국 증시 데이터를 수집하는 중..."):
+                news_data, err = fetch_news(tickers, news_count)
+                earnings_data = fetch_earnings(tickers)
+
+            if err:
+                st.error(f"❌ 뉴스 수집 실패: {err}")
+            else:
+                st.session_state.daily_news_data = news_data
+                st.session_state.daily_earnings_data = earnings_data
+                st.session_state.daily_news_done = True
+                st.session_state.daily_step = max(st.session_state.daily_step, 2)
+                st.success(f"✅ 뉴스 {len(news_data)}건, 어닝 일정 {len(earnings_data)}건 수집 완료!")
 
     if st.session_state.daily_news_done:
         with st.expander("📋 수집된 데이터 미리보기", expanded=False):
+            news_html = "".join(
+                [
+                    f'<div style="color:#E6EDF3;font-size:12px;padding:6px 0;border-bottom:1px solid #21262D;">'
+                    f'<span style="color:#00E676;font-weight:600;">[{n.get("symbol","")}]</span> {n.get("title","")}'
+                    f'<span style="color:#30363D;font-size:10px;margin-left:8px;">{n.get("publishedDate","")[:10]}</span></div>'
+                    for n in st.session_state.daily_news_data[:7]
+                ]
+            ) or '<div style="color:#8B949E;">수집된 뉴스가 없습니다.</div>'
+
+            earnings_html = "".join(
+                [
+                    f'<div style="color:#E6EDF3;font-size:12px;padding:4px 0;">'
+                    f'<span style="color:#7B68EE;font-weight:600;">{e.get("symbol","")}</span>'
+                    f' — {e.get("date","")}  EPS 예상: <span style="color:#00E676;">${e.get("epsEstimated","N/A")}</span></div>'
+                    for e in st.session_state.daily_earnings_data
+                ]
+            ) or '<div style="color:#8B949E;">해당 종목의 어닝 일정이 없습니다.</div>'
+
             card(
-                """
-                <div style="color:#00E676;font-weight:600;margin-bottom:10px;font-size:13px;">📰 오늘의 주요 뉴스</div>
-                <div style="color:#8B949E;font-size:12px;line-height:1.9;">
-                    수집된 뉴스 헤드라인이 여기에 목록으로 표시됩니다.<br>
-                    (예: NVDA Q2 실적 예상치 30% 상회 · AAPL 新 AI 기능 발표 예정 · Fed 금리 동결 시사 ...)
-                </div>
-                <div style="color:#00E676;font-weight:600;margin:14px 0 10px;font-size:13px;">📅 오늘 어닝 컨퍼런스 콜 일정</div>
-                <div style="color:#8B949E;font-size:12px;line-height:1.9;">
-                    오늘 실적 발표 예정 종목 리스트가 여기에 표시됩니다.
-                </div>
-                """
+                f'<div style="color:#00E676;font-weight:600;margin-bottom:10px;font-size:13px;">📰 오늘의 주요 뉴스</div>'
+                f"{news_html}"
+                f'<div style="color:#00E676;font-weight:600;margin:14px 0 10px;font-size:13px;">📅 어닝 컨퍼런스 콜 일정</div>'
+                f"{earnings_html}"
             )
 
     divider()
@@ -408,9 +807,8 @@ with tab_daily:
 
     user_comment = st.text_area(
         "✍️ 내 생각 한 줄 코멘트 (선택)",
-        placeholder="예: NVDA는 지금 잠깐 숨 고르는 타이밍인 것 같아요. AI 거품 논란도 있지만...",
+        placeholder="예: NVDA는 지금 잠깐 숨 고르는 타이밍인 것 같아요.",
         height=72,
-        help="대본의 '내 생각에는' 구역에 자연스럽게 녹아들도록 자동 합성됩니다.",
     )
 
     c4, c5 = st.columns(2)
@@ -423,30 +821,38 @@ with tab_daily:
         if not st.session_state.daily_news_done:
             st.warning("⚠️ Step 1 데이터 수집을 먼저 완료해주세요.")
         else:
-            with st.spinner("Claude AI가 후킹 대본을 작성 중..."):
-                time.sleep(2)
-            st.session_state.daily_script_done = True
-            st.session_state.daily_step = max(st.session_state.daily_step, 3)
-            st.success("✅ 대본 생성 완료! 금지어 필터링도 함께 완료되었습니다.")
+            with st.spinner("Claude AI가 후킹 대본을 작성 중... (30초~1분 소요)"):
+                titles, script, err = generate_daily_script(
+                    st.session_state.daily_news_data,
+                    st.session_state.daily_earnings_data,
+                    user_comment,
+                    video_type,
+                    tone_style,
+                )
+            if err:
+                st.error(f"❌ 대본 생성 실패: {err}")
+            else:
+                st.session_state.daily_titles = titles
+                st.session_state.daily_script_text = script
+                st.session_state.daily_script_done = True
+                st.session_state.daily_step = max(st.session_state.daily_step, 3)
+                st.success("✅ 대본 생성 완료!")
 
     if st.session_state.daily_script_done:
-        card(
-            """
-            <div style="font-size:11px;color:#8B949E;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">
-                🎯 AI 추천 유튜브 제목 (3개 중 선택)
-            </div>
-            <div style="color:#E6EDF3;font-size:13px;line-height:2.2;">
-                ① 생성된 후킹 제목 #1 이 여기에 표시됩니다<br>
-                ② 생성된 후킹 제목 #2 이 여기에 표시됩니다<br>
-                ③ 생성된 후킹 제목 #3 이 여기에 표시됩니다
-            </div>
-            """
-        )
+        titles = st.session_state.daily_titles
+        if titles:
+            titles_html = "".join(
+                [f'<div style="color:#E6EDF3;font-size:13px;line-height:2.2;">{"①②③"[i]} {t}</div>' for i, t in enumerate(titles)]
+            )
+            card(
+                f'<div style="font-size:11px;color:#8B949E;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">🎯 AI 추천 유튜브 제목 (3개)</div>'
+                + titles_html
+            )
 
         script_content = st.text_area(
             "📝 생성된 대본 — 직접 수정 가능합니다",
-            value="[Claude AI가 생성한 대본 전문이 여기에 출력됩니다. 클릭하여 직접 편집하세요.]",
-            height=260,
+            value=st.session_state.daily_script_text,
+            height=300,
             key="daily_script_editor",
         )
         st.session_state.daily_script_text = script_content
@@ -460,12 +866,7 @@ with tab_daily:
     with c6:
         voice_persona = st.selectbox(
             "AI 유튜버 목소리 페르소나",
-            [
-                "남성 · 전문 애널리스트형",
-                "남성 · 에너지 넘치는 예능형",
-                "여성 · 차분한 해설형",
-                "여성 · 활기찬 진행형",
-            ],
+            list(VOICE_IDS.keys()),
         )
     with c7:
         voice_speed = st.slider("말하기 속도", 0.8, 1.5, 1.0, 0.05)
@@ -473,19 +874,30 @@ with tab_daily:
     if st.button("🎙️  Step 3 · 보이스 합성 시작", key="btn_d_tts"):
         if not st.session_state.daily_script_done:
             st.warning("⚠️ Step 2 대본 생성을 먼저 완료해주세요.")
+        elif not st.session_state.daily_script_text.strip():
+            st.warning("⚠️ 대본 내용이 없습니다.")
         else:
-            with st.spinner("ElevenLabs가 음성을 합성 중..."):
-                time.sleep(2)
-            st.session_state.daily_voice_done = True
-            st.session_state.daily_step = max(st.session_state.daily_step, 4)
-            st.success("✅ 음성 합성 완료!")
+            with st.spinner("ElevenLabs가 음성을 합성 중... (30초~2분 소요)"):
+                audio_bytes, err = synthesize_voice(
+                    st.session_state.daily_script_text,
+                    voice_persona,
+                )
+            if err:
+                st.error(f"❌ 음성 합성 실패: {err}")
+            else:
+                st.session_state.daily_audio_bytes = audio_bytes
+                st.session_state.daily_voice_done = True
+                st.session_state.daily_step = max(st.session_state.daily_step, 4)
+                st.success("✅ 음성 합성 완료!")
 
-    if st.session_state.daily_voice_done:
-        card(
-            """
-            <div style="font-size:11px;color:#8B949E;margin-bottom:8px;">🎵 합성된 오디오 미리듣기</div>
-            <div style="color:#8B949E;font-size:12px;">[ ▶ 오디오 플레이어가 여기에 표시됩니다 ]</div>
-            """
+    if st.session_state.daily_voice_done and st.session_state.daily_audio_bytes:
+        st.audio(st.session_state.daily_audio_bytes, format="audio/mp3")
+        st.download_button(
+            "⬇️  MP3 음성 다운로드",
+            data=st.session_state.daily_audio_bytes,
+            file_name="alphex_voice.mp3",
+            mime="audio/mp3",
+            key="btn_d_audio_dl",
         )
 
     divider()
@@ -509,24 +921,34 @@ with tab_daily:
         if not st.session_state.daily_voice_done:
             st.warning("⚠️ Step 3 보이스 합성을 먼저 완료해주세요.")
         else:
-            bar = st.progress(0)
-            msg = st.empty()
-            stages = [
-                "🎞️  Alphex Vue 시연 레이어 생성 중...",
-                "✂️  자막 동기화 (0.1초 정밀 매칭)...",
-                "🔤  자막 스타일 & 반투명 배경 적용 중...",
-                "🚫  금지어 최종 스크리닝 & 강제 치환 중...",
-                "📤  Creatomate 렌더링 엔진 호출 중...",
-                "📦  MP4 파일 생성 완료...",
-            ]
-            for i, s in enumerate(stages):
-                time.sleep(0.6)
-                bar.progress((i + 1) / len(stages))
-                msg.markdown(f'<div style="color:#8B949E;font-size:13px;">{s}</div>', unsafe_allow_html=True)
-            st.session_state.daily_video_done = True
-            st.session_state.daily_step = 5
-            msg.empty()
-            st.success("🎉 마케팅 영상 제작 완료!")
+            selected_title = (
+                st.session_state.daily_titles[0]
+                if st.session_state.daily_titles
+                else "Alphex Contento 마케팅 영상"
+            )
+            script_excerpt = st.session_state.daily_script_text[:400]
+
+            with st.spinner("Creatomate에 영상 렌더링 요청 중..."):
+                render_id, err = create_video_render(selected_title, script_excerpt, output_ratio)
+
+            if err:
+                st.error(f"❌ 영상 제작 실패: {err}")
+            else:
+                st.session_state.daily_render_id = render_id
+                with st.spinner("영상 렌더링 중... (1~3분 소요)"):
+                    for _ in range(36):
+                        time.sleep(5)
+                        status, url = poll_render(render_id)
+                        if status == "succeeded":
+                            st.session_state.daily_video_url = url
+                            st.session_state.daily_video_done = True
+                            st.session_state.daily_step = 5
+                            break
+                        elif status == "failed":
+                            st.error("❌ 렌더링 실패. 다시 시도해주세요.")
+                            break
+                    else:
+                        st.warning("⏳ 렌더링이 오래 걸리고 있습니다. 잠시 후 다시 확인해주세요.")
 
     # ── STEP 5 · 완성 & 다운로드 ─────────────────────────
     if st.session_state.daily_video_done:
@@ -540,21 +962,23 @@ with tab_daily:
             <div style="font-size:48px;margin-bottom:12px;">🎬</div>
             <div style="color:#00E676;font-size:20px;font-weight:700;margin-bottom:6px;">마케팅 영상 완성!</div>
             <div style="color:#8B949E;font-size:13px;margin-bottom:20px;">Alphex Contento 파이프라인이 성공적으로 완료되었습니다.</div>
-            <div style="color:#30363D;font-size:12px;">[ 🎥 비디오 플레이어 ]</div>
         </div>
         """,
             unsafe_allow_html=True,
         )
         c10, c11, c12 = st.columns(3)
         with c10:
-            st.button("⬇️  MP4 다운로드", key="btn_d_dl")
+            if st.session_state.daily_video_url:
+                st.link_button("⬇️  MP4 다운로드", st.session_state.daily_video_url)
         with c11:
             st.button("📤  유튜브 예약 업로드", key="btn_d_yt")
         with c12:
             if st.button("🔁  새 영상 제작", key="btn_d_reset"):
                 for k in [
-                    "daily_step", "daily_news_done", "daily_script_done",
-                    "daily_voice_done", "daily_video_done",
+                    "daily_step", "daily_news_done", "daily_news_data", "daily_earnings_data",
+                    "daily_script_done", "daily_script_text", "daily_titles",
+                    "daily_voice_done", "daily_audio_bytes",
+                    "daily_video_done", "daily_video_url", "daily_render_id",
                 ]:
                     st.session_state[k] = _defaults[k]
                 st.rerun()
@@ -580,23 +1004,25 @@ with tab_weekend:
         include_earnings = st.checkbox("주요 기업 실적 일정", value=True)
 
     if st.button("📊  Step 1 · 주간 시장 데이터 취합 시작", key="btn_w_collect"):
-        with st.spinner("지난 5일간 시장 데이터를 분석 중..."):
-            time.sleep(1.5)
-        st.session_state.wknd_data_done = True
-        st.session_state.wknd_step = max(st.session_state.wknd_step, 2)
-        st.success("✅ 주간 데이터 취합 완료!")
+        with st.spinner("이번 주 시장 데이터를 가져오는 중..."):
+            market_data = fetch_market_indices()
+        if market_data:
+            st.session_state.wknd_market_data = market_data
+            st.session_state.wknd_data_done = True
+            st.session_state.wknd_step = max(st.session_state.wknd_step, 2)
+            st.success("✅ 주간 데이터 취합 완료!")
+        else:
+            st.error("❌ 데이터 수집 실패. FMP API 키를 확인해주세요.")
 
-    if st.session_state.wknd_data_done:
+    if st.session_state.wknd_data_done and st.session_state.wknd_market_data:
         with st.expander("📈 주간 시장 요약 미리보기", expanded=False):
-            c_m1, c_m2, c_m3, c_m4 = st.columns(4)
-            with c_m1:
-                st.metric("S&P 500", "+2.34%", "+1.21%")
-            with c_m2:
-                st.metric("NASDAQ", "+3.10%", "+1.55%")
-            with c_m3:
-                st.metric("DOW", "+1.87%", "+0.92%")
-            with c_m4:
-                st.metric("VIX", "14.2", "-2.3")
+            md = st.session_state.wknd_market_data
+            cols = st.columns(len(md) if md else 4)
+            for i, (name, d) in enumerate(md.items()):
+                change = d.get("change", 0)
+                delta_str = f"{change:+.2f}%"
+                with cols[i]:
+                    st.metric(name, f"{d.get('price', 0):,.2f}", delta_str)
 
     divider()
 
@@ -637,7 +1063,7 @@ with tab_weekend:
 
     wknd_comment = st.text_area(
         "✍️ 이번 주 내 한 마디 (선택)",
-        placeholder="예: 이번 주 하락장을 버텨낸 분들, 진짜 수고하셨어요. 제가 느끼기엔...",
+        placeholder="예: 이번 주 하락장을 버텨낸 분들, 진짜 수고하셨어요.",
         height=72,
     )
 
@@ -645,23 +1071,43 @@ with tab_weekend:
         if not st.session_state.wknd_data_done:
             st.warning("⚠️ Step 1 데이터 취합을 먼저 완료해주세요.")
         else:
-            with st.spinner("주간 요약 + 투자 대가 인사이트를 융합 중..."):
-                time.sleep(2)
-            st.session_state.wknd_script_done = True
-            st.session_state.wknd_step = max(st.session_state.wknd_step, 4)
-            st.success("✅ 주말 스페셜 대본 완성!")
+            with st.spinner("주간 요약 + 투자 대가 인사이트를 융합 중... (30초~1분 소요)"):
+                titles, script, err = generate_weekend_script(
+                    st.session_state.wknd_market_data,
+                    legend,
+                    insight_theme,
+                    wknd_comment,
+                )
+            if err:
+                st.error(f"❌ 대본 생성 실패: {err}")
+            else:
+                st.session_state.wknd_titles = titles
+                st.session_state.wknd_script_text = script
+                st.session_state.wknd_script_done = True
+                st.session_state.wknd_step = max(st.session_state.wknd_step, 4)
+                st.success("✅ 주말 스페셜 대본 완성!")
 
     if st.session_state.wknd_script_done:
-        st.text_area(
+        if st.session_state.wknd_titles:
+            titles_html = "".join(
+                [f'<div style="color:#E6EDF3;font-size:13px;line-height:2.2;">{"①②③"[i]} {t}</div>'
+                 for i, t in enumerate(st.session_state.wknd_titles)]
+            )
+            card(
+                '<div style="font-size:11px;color:#8B949E;margin-bottom:8px;">🎯 AI 추천 유튜브 제목</div>'
+                + titles_html
+            )
+        wknd_script = st.text_area(
             "📝 주말 롱폼 대본 — 직접 수정 가능",
-            value="[주간 시장 요약 + 투자 대가 인사이트가 융합된 롱폼 대본이 여기에 출력됩니다.]",
-            height=280,
+            value=st.session_state.wknd_script_text,
+            height=320,
             key="wknd_script_editor",
         )
+        st.session_state.wknd_script_text = wknd_script
 
     divider()
 
-    # ── STEP 4 · 보이스 합성 (Weekend) ───────────────────
+    # ── STEP 4 · 보이스 합성 & 영상 조립 ─────────────────
     section_header(4, "보이스 합성 & 영상 조립", active=st.session_state.wknd_step >= 4)
 
     c_w6, c_w7 = st.columns(2)
@@ -672,30 +1118,55 @@ with tab_weekend:
         wknd_ratio = st.selectbox(
             "출력 비율 (주말 롱폼)", ["와이드 16:9 (유튜브 권장)", "숏폼 9:16 (요약 클립)", "정방형 1:1"]
         )
+        wknd_voice = st.selectbox("목소리 페르소나", list(VOICE_IDS.keys()), key="wknd_voice_sel")
 
     if st.button("🎬  Step 4+5 · 주말 종합 영상 제작 시작!", key="btn_w_render"):
         if not st.session_state.wknd_script_done:
             st.warning("⚠️ Step 3 대본 생성을 먼저 완료해주세요.")
         else:
-            bar2 = st.progress(0)
-            msg2 = st.empty()
-            stages2 = [
-                "📊  주간 차트 레이어 렌더링 중...",
-                "📅  이벤트 캘린더 인포그래픽 생성 중...",
-                "🎙️  ElevenLabs 보이스 합성 중...",
-                "✂️  자막 동기화 & 스타일 적용 중...",
-                "📤  Creatomate 최종 렌더링 중...",
-            ]
-            for i, s in enumerate(stages2):
-                time.sleep(0.6)
-                bar2.progress((i + 1) / len(stages2))
-                msg2.markdown(f'<div style="color:#8B949E;font-size:13px;">{s}</div>', unsafe_allow_html=True)
-            st.session_state.wknd_video_done = True
-            st.session_state.wknd_step = 5
-            msg2.empty()
-            st.success("🎉 주말 스페셜 영상 완성!")
+            with st.spinner("ElevenLabs 음성 합성 중..."):
+                audio_bytes, err = synthesize_voice(st.session_state.wknd_script_text, wknd_voice)
+            if err:
+                st.error(f"❌ 음성 합성 실패: {err}")
+            else:
+                st.session_state.wknd_audio_bytes = audio_bytes
+                st.session_state.wknd_voice_done = True
 
-    # ── STEP 5 · 완성 (Weekend) ───────────────────────────
+                selected_title = (
+                    st.session_state.wknd_titles[0]
+                    if st.session_state.wknd_titles
+                    else "Alphex Contento 주말 스페셜"
+                )
+                with st.spinner("Creatomate 영상 렌더링 중... (1~3분 소요)"):
+                    render_id, err2 = create_video_render(
+                        selected_title, st.session_state.wknd_script_text[:400], wknd_ratio
+                    )
+                if err2:
+                    st.error(f"❌ 영상 제작 실패: {err2}")
+                else:
+                    for _ in range(36):
+                        time.sleep(5)
+                        status, url = poll_render(render_id)
+                        if status == "succeeded":
+                            st.session_state.wknd_video_url = url
+                            st.session_state.wknd_video_done = True
+                            st.session_state.wknd_step = 5
+                            st.success("🎉 주말 스페셜 영상 완성!")
+                            break
+                        elif status == "failed":
+                            st.error("❌ 렌더링 실패.")
+                            break
+
+    if st.session_state.wknd_voice_done and st.session_state.wknd_audio_bytes:
+        st.audio(st.session_state.wknd_audio_bytes, format="audio/mp3")
+        st.download_button(
+            "⬇️  MP3 음성 다운로드",
+            data=st.session_state.wknd_audio_bytes,
+            file_name="alphex_weekend_voice.mp3",
+            mime="audio/mp3",
+            key="btn_w_audio_dl",
+        )
+
     if st.session_state.wknd_video_done:
         st.markdown(
             """
@@ -704,19 +1175,21 @@ with tab_weekend:
                     padding:28px;text-align:center;margin:16px 0;">
             <div style="font-size:44px;margin-bottom:10px;">📅</div>
             <div style="color:#7B68EE;font-size:18px;font-weight:700;margin-bottom:6px;">주말 스페셜 완성!</div>
-            <div style="color:#8B949E;font-size:13px;">[ 🎥 비디오 플레이어 ]</div>
         </div>
         """,
             unsafe_allow_html=True,
         )
         c_dl1, c_dl2 = st.columns(2)
         with c_dl1:
-            st.button("⬇️  MP4 다운로드", key="btn_w_dl")
+            if st.session_state.wknd_video_url:
+                st.link_button("⬇️  MP4 다운로드", st.session_state.wknd_video_url)
         with c_dl2:
             if st.button("🔁  새 주말 영상 제작", key="btn_w_reset"):
                 for k in [
-                    "wknd_step", "wknd_data_done", "wknd_script_done",
-                    "wknd_voice_done", "wknd_video_done",
+                    "wknd_step", "wknd_data_done", "wknd_market_data",
+                    "wknd_script_done", "wknd_script_text", "wknd_titles",
+                    "wknd_voice_done", "wknd_audio_bytes",
+                    "wknd_video_done", "wknd_video_url",
                 ]:
                     st.session_state[k] = _defaults[k]
                 st.rerun()
@@ -732,59 +1205,25 @@ with tab_settings:
         unsafe_allow_html=True,
     )
     info_box(
-        "⚠️ <b>보안 안내:</b> API 키는 Replit의 Secrets 탭에 저장하는 것을 권장합니다. "
-        "여기서 입력한 값은 현재 세션 동안만 유지됩니다.",
-        "#FFA726",
+        "✅ <b>API 키는 Streamlit Cloud Secrets에 저장되어 있습니다.</b> "
+        "아래에서 현재 연결 상태를 확인하세요. 키를 변경하려면 Streamlit Cloud → Settings → Secrets에서 수정하세요.",
+        "#00E676",
     )
 
     divider()
 
-    # ── API 자격 증명 입력 ────────────────────────────────
     st.markdown(
-        '<div style="color:#E6EDF3;font-size:15px;font-weight:600;margin-bottom:16px;">🔑 API 자격 증명 관리</div>',
+        '<div style="color:#E6EDF3;font-size:15px;font-weight:600;margin-bottom:16px;">🔑 API 연결 상태 확인</div>',
         unsafe_allow_html=True,
     )
 
-    c_s1, c_s2 = st.columns(2)
-
-    with c_s1:
-        st.markdown(
-            '<div style="color:#8B949E;font-size:12px;margin-bottom:6px;">🤖 Claude API (Anthropic)</div>',
-            unsafe_allow_html=True,
-        )
-        claude_key = st.text_input("Claude API Key", type="password", placeholder="sk-ant-api03-...", label_visibility="collapsed")
-        if claude_key:
-            st.session_state.api_claude = claude_key
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(
-            '<div style="color:#8B949E;font-size:12px;margin-bottom:6px;">🎬 Creatomate API</div>',
-            unsafe_allow_html=True,
-        )
-        creatomate_key = st.text_input("Creatomate Key", type="password", placeholder="cr_live_...", label_visibility="collapsed")
-        if creatomate_key:
-            st.session_state.api_creatomate = creatomate_key
-
-    with c_s2:
-        st.markdown(
-            '<div style="color:#8B949E;font-size:12px;margin-bottom:6px;">🎵 ElevenLabs API</div>',
-            unsafe_allow_html=True,
-        )
-        el_key = st.text_input("ElevenLabs Key", type="password", placeholder="xi_...", label_visibility="collapsed")
-        if el_key:
-            st.session_state.api_elevenlabs = el_key
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(
-            '<div style="color:#8B949E;font-size:12px;margin-bottom:6px;">📰 FMP API (금융 데이터)</div>',
-            unsafe_allow_html=True,
-        )
-        fmp_key = st.text_input("FMP Key", type="password", placeholder="fmp_live_...", label_visibility="collapsed")
-        if fmp_key:
-            st.session_state.api_fmp = fmp_key
-
-    if st.button("💾  API 설정 저장", key="btn_save_api"):
-        st.success("✅ API 키가 저장되었습니다. 사이드바 상태가 업데이트됩니다.")
+    col1, col2 = st.columns(2)
+    with col1:
+        api_badge("Claude API (Anthropic)", "CLAUDE_API_KEY", "api_claude")
+        api_badge("Creatomate 렌더링", "CREATOMATE_API_KEY", "api_creatomate")
+    with col2:
+        api_badge("ElevenLabs TTS", "ELEVENLABS_API_KEY", "api_elevenlabs")
+        api_badge("FMP 금융 데이터", "FMP_API_KEY", "api_fmp")
 
     divider()
 
@@ -803,10 +1242,7 @@ with tab_settings:
         )
         st.session_state.persona_name = persona_name
 
-        voice_default = st.selectbox(
-            "기본 목소리 스타일",
-            ["남성 · 전문 애널리스트형", "남성 · 에너지 넘치는 예능형", "여성 · 차분한 해설형", "여성 · 활기찬 진행형"],
-        )
+        voice_default = st.selectbox("기본 목소리 스타일", list(VOICE_IDS.keys()))
     with c_p2:
         tone_default = st.selectbox(
             "기본 대본 톤",
@@ -822,7 +1258,7 @@ with tab_settings:
 
     divider()
 
-    # ── 인물 촬영본 편집 (선택) ───────────────────────────
+    # ── 인물 촬영본 편집 ──────────────────────────────────
     st.markdown(
         '<div style="color:#E6EDF3;font-size:15px;font-weight:600;margin-bottom:16px;">✂️ 인물 촬영본 AI 편집 (선택 기능)</div>',
         unsafe_allow_html=True,
