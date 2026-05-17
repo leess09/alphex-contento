@@ -1205,15 +1205,52 @@ with tab_settings:
         unsafe_allow_html=True,
     )
     info_box(
-        "✅ <b>API 키는 Streamlit Cloud Secrets에 저장되어 있습니다.</b> "
-        "아래에서 현재 연결 상태를 확인하세요. 키를 변경하려면 Streamlit Cloud → Settings → Secrets에서 수정하세요.",
-        "#00E676",
+        "⚠️ <b>보안 안내:</b> 여기서 입력한 API 키는 현재 세션 동안만 유지됩니다. "
+        "브라우저를 닫으면 다시 입력해야 합니다.",
+        "#FFA726",
     )
 
     divider()
 
     st.markdown(
-        '<div style="color:#E6EDF3;font-size:15px;font-weight:600;margin-bottom:16px;">🔑 API 연결 상태 확인</div>',
+        '<div style="color:#E6EDF3;font-size:15px;font-weight:600;margin-bottom:16px;">🔑 API 키 입력</div>',
+        unsafe_allow_html=True,
+    )
+
+    c_s1, c_s2 = st.columns(2)
+
+    with c_s1:
+        st.markdown('<div style="color:#8B949E;font-size:12px;margin-bottom:6px;">🤖 Claude API (Anthropic)</div>', unsafe_allow_html=True)
+        claude_key = st.text_input("Claude API Key", type="password", placeholder="sk-ant-api03-...", label_visibility="collapsed", key="input_claude")
+        if claude_key:
+            st.session_state.api_claude = claude_key
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div style="color:#8B949E;font-size:12px;margin-bottom:6px;">🎬 Creatomate API</div>', unsafe_allow_html=True)
+        creatomate_key = st.text_input("Creatomate Key", type="password", placeholder="cr_live_...", label_visibility="collapsed", key="input_creatomate")
+        if creatomate_key:
+            st.session_state.api_creatomate = creatomate_key
+
+    with c_s2:
+        st.markdown('<div style="color:#8B949E;font-size:12px;margin-bottom:6px;">🎵 ElevenLabs API</div>', unsafe_allow_html=True)
+        el_key = st.text_input("ElevenLabs Key", type="password", placeholder="xi_...", label_visibility="collapsed", key="input_elevenlabs")
+        if el_key:
+            st.session_state.api_elevenlabs = el_key
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div style="color:#8B949E;font-size:12px;margin-bottom:6px;">📰 FMP API (금융 데이터)</div>', unsafe_allow_html=True)
+        fmp_key = st.text_input("FMP Key", type="password", placeholder="영문+숫자 조합", label_visibility="collapsed", key="input_fmp")
+        if fmp_key:
+            st.session_state.api_fmp = fmp_key
+
+    if st.button("💾  API 키 저장", key="btn_save_api"):
+        st.success("✅ API 키가 저장되었습니다. 사이드바 상태가 업데이트됩니다.")
+        st.rerun()
+
+    divider()
+
+    st.markdown(
+        '<div style="color:#E6EDF3;font-size:15px;font-weight:600;margin-bottom:16px;">🔑 현재 연결 상태</div>',
         unsafe_allow_html=True,
     )
 
