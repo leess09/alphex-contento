@@ -341,7 +341,7 @@ def fetch_news(tickers_str: str, count: int):
     return all_news[:count], None
 
 
-# ── 어닝 캘린더: FMP → Yahoo Finance v7 → Yahoo Finance calendarEvents 순으로 시도
+# ── 어닝 캘린더: Yahoo Finance v7 → calendarEvents → FMP 순으로 시도
 def fetch_earnings(tickers_str: str):
     tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
     api_key = _secret("FMP_API_KEY", "api_fmp")
@@ -351,55 +351,31 @@ def fetch_earnings(tickers_str: str):
     for ticker in tickers[:5]:
         found = False
 
-        # 1순위: FMP stable/v4 (티커별 조회)
-        if api_key:
-            for endpoint, params in [
-                (
-                    "https://financialmodelingprep.com/stable/earnings-calendar",
-                    {"symbol": ticker, "apikey": api_key},
-                ),
-                (
-                    "https://financialmodelingprep.com/api/v4/earning_calendar",
-                    {"symbol": ticker, "apikey": api_key},
-                ),
-            ]:
-                try:
-                    r = requests.get(endpoint, params=params, timeout=15)
-                    if r.status_code == 200:
-                        data = r.json()
-                        if isinstance(data, list) and data:
-                            result.extend(data[:3])
-                            found = True
-                            break
-                except Exception:
-                    continue
+        # 1순위: Yahoo Finance v7 quote — earningsTimestamp 직접 읽기 (가장 정확)
+        try:
+            r = requests.get(
+                "https://query2.finance.yahoo.com/v7/finance/quote",
+                params={"symbols": ticker},
+                headers=headers,
+                timeout=10,
+            )
+            if r.status_code == 200:
+                quotes = r.json().get("quoteResponse", {}).get("result", [])
+                if quotes:
+                    q = quotes[0]
+                    ts = q.get("earningsTimestamp") or q.get("earningsTimestampStart")
+                    if ts:
+                        date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                        result.append({
+                            "symbol": ticker,
+                            "date": date_str,
+                            "epsEstimated": "N/A",
+                        })
+                        found = True
+        except Exception:
+            pass
 
-        # 2순위: Yahoo Finance v7 quote (earningsTimestamp — 가장 신뢰도 높음)
-        if not found:
-            try:
-                r = requests.get(
-                    "https://query2.finance.yahoo.com/v7/finance/quote",
-                    params={"symbols": ticker},
-                    headers=headers,
-                    timeout=10,
-                )
-                if r.status_code == 200:
-                    quotes = r.json().get("quoteResponse", {}).get("result", [])
-                    if quotes:
-                        q = quotes[0]
-                        ts = q.get("earningsTimestamp") or q.get("earningsTimestampStart")
-                        if ts:
-                            date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-                            result.append({
-                                "symbol": ticker,
-                                "date": date_str,
-                                "epsEstimated": "N/A",
-                            })
-                            found = True
-            except Exception:
-                pass
-
-        # 3순위: Yahoo Finance calendarEvents
+        # 2순위: Yahoo Finance calendarEvents 모듈
         if not found:
             try:
                 r = requests.get(
@@ -423,8 +399,35 @@ def fetch_earnings(tickers_str: str):
                             "date": date_str,
                             "epsEstimated": events.get("epsEstimate", {}).get("fmt", "N/A"),
                         })
+                        found = True
             except Exception:
                 pass
+
+        # 3순위: FMP — 반드시 해당 티커 결과만 사용
+        if not found and api_key:
+            for endpoint, params in [
+                (
+                    "https://financialmodelingprep.com/stable/earnings-calendar",
+                    {"symbol": ticker, "apikey": api_key},
+                ),
+                (
+                    "https://financialmodelingprep.com/api/v4/earning_calendar",
+                    {"symbol": ticker, "apikey": api_key},
+                ),
+            ]:
+                try:
+                    r = requests.get(endpoint, params=params, timeout=15)
+                    if r.status_code == 200:
+                        data = r.json()
+                        if isinstance(data, list):
+                            # 반드시 티커 일치 항목만 사용
+                            matched = [e for e in data if e.get("symbol", "").upper() == ticker]
+                            if matched:
+                                result.extend(matched[:2])
+                                found = True
+                                break
+                except Exception:
+                    continue
 
     return result
 
