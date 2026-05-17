@@ -341,61 +341,91 @@ def fetch_news(tickers_str: str, count: int):
     return all_news[:count], None
 
 
-# ── FMP stable API: 어닝 캘린더 ──────────────────────
+# ── 어닝 캘린더: FMP → Yahoo Finance v7 → Yahoo Finance calendarEvents 순으로 시도
 def fetch_earnings(tickers_str: str):
     tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
     api_key = _secret("FMP_API_KEY", "api_fmp")
-
-    if api_key:
-        for endpoint, params in [
-            (
-                "https://financialmodelingprep.com/stable/earnings-calendar",
-                {"apikey": api_key},
-            ),
-            (
-                "https://financialmodelingprep.com/api/v4/earning_calendar",
-                {"apikey": api_key},
-            ),
-        ]:
-            try:
-                r = requests.get(endpoint, params=params, timeout=15)
-                if r.status_code == 200:
-                    data = r.json()
-                    if isinstance(data, list):
-                        if tickers:
-                            data = [e for e in data if e.get("symbol") in tickers]
-                        return data[:10]
-            except Exception:
-                continue
-
-    # Yahoo Finance 폴백
-    result = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    result = []
+
     for ticker in tickers[:5]:
-        try:
-            r = requests.get(
-                f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}",
-                params={"modules": "calendarEvents"},
-                headers=headers,
-                timeout=10,
-            )
-            if r.status_code == 200:
-                events = (
-                    r.json().get("quoteSummary", {})
-                    .get("result", [{}])[0]
-                    .get("calendarEvents", {})
-                    .get("earnings", {})
+        found = False
+
+        # 1순위: FMP stable/v4 (티커별 조회)
+        if api_key:
+            for endpoint, params in [
+                (
+                    "https://financialmodelingprep.com/stable/earnings-calendar",
+                    {"symbol": ticker, "apikey": api_key},
+                ),
+                (
+                    "https://financialmodelingprep.com/api/v4/earning_calendar",
+                    {"symbol": ticker, "apikey": api_key},
+                ),
+            ]:
+                try:
+                    r = requests.get(endpoint, params=params, timeout=15)
+                    if r.status_code == 200:
+                        data = r.json()
+                        if isinstance(data, list) and data:
+                            result.extend(data[:3])
+                            found = True
+                            break
+                except Exception:
+                    continue
+
+        # 2순위: Yahoo Finance v7 quote (earningsTimestamp — 가장 신뢰도 높음)
+        if not found:
+            try:
+                r = requests.get(
+                    "https://query2.finance.yahoo.com/v7/finance/quote",
+                    params={"symbols": ticker},
+                    headers=headers,
+                    timeout=10,
                 )
-                dates = events.get("earningsDate", [])
-                if dates:
-                    date_str = datetime.fromtimestamp(dates[0].get("raw", 0)).strftime("%Y-%m-%d")
-                    result.append({
-                        "symbol": ticker,
-                        "date": date_str,
-                        "epsEstimated": events.get("epsEstimate", {}).get("fmt", "N/A"),
-                    })
-        except Exception:
-            continue
+                if r.status_code == 200:
+                    quotes = r.json().get("quoteResponse", {}).get("result", [])
+                    if quotes:
+                        q = quotes[0]
+                        ts = q.get("earningsTimestamp") or q.get("earningsTimestampStart")
+                        if ts:
+                            date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                            result.append({
+                                "symbol": ticker,
+                                "date": date_str,
+                                "epsEstimated": "N/A",
+                            })
+                            found = True
+            except Exception:
+                pass
+
+        # 3순위: Yahoo Finance calendarEvents
+        if not found:
+            try:
+                r = requests.get(
+                    f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}",
+                    params={"modules": "calendarEvents"},
+                    headers=headers,
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    events = (
+                        r.json().get("quoteSummary", {})
+                        .get("result", [{}])[0]
+                        .get("calendarEvents", {})
+                        .get("earnings", {})
+                    )
+                    dates = events.get("earningsDate", [])
+                    if dates:
+                        date_str = datetime.fromtimestamp(dates[0].get("raw", 0)).strftime("%Y-%m-%d")
+                        result.append({
+                            "symbol": ticker,
+                            "date": date_str,
+                            "epsEstimated": events.get("epsEstimate", {}).get("fmt", "N/A"),
+                        })
+            except Exception:
+                pass
+
     return result
 
 
