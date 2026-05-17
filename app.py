@@ -148,6 +148,8 @@ _defaults = {
     "daily_earnings_data": [],
     "daily_manual_earning": "",
     "daily_selected_news": [],
+    "daily_youtube_url": "",
+    "daily_youtube_transcript": "",
     "daily_script_done": False,
     "daily_script_text": "",
     "daily_titles": [],
@@ -279,34 +281,101 @@ def market_mode() -> tuple[str, str]:
 # 6. API 함수
 # ══════════════════════════════════════════════════════════
 
-# ── 미국 시장 전체 주요 이슈 뉴스 (RSS, 티커 무관) ──────
-def fetch_market_news(count: int = 8):
+# ── 미국 시장 주요 이슈 뉴스 (CNBC RSS + FMP) ───────────
+def fetch_market_news(count: int = 10):
+    api_key = _secret("FMP_API_KEY", "api_fmp")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     def clean(text: str) -> str:
         text = re.sub(r"<[^>]+>", " ", text or "")
-        return " ".join(text.split())[:200]
+        return " ".join(text.split())[:250]
 
     all_news = []
-    for url in [
-        "https://feeds.marketwatch.com/marketwatch/topstories/",
-        "https://finance.yahoo.com/rss/topfinstories",
-    ]:
-        try:
-            r = requests.get(url, timeout=15, headers=headers)
-            if r.status_code == 200:
-                root = ET.fromstring(r.content)
-                for item in root.findall(".//item"):
-                    title = clean(item.findtext("title", ""))
-                    desc = clean(item.findtext("description", "") or item.findtext("summary", ""))
-                    pub = item.findtext("pubDate", "")[:16]
-                    if title:
-                        all_news.append({"title": title, "description": desc, "publishedDate": pub})
-            if len(all_news) >= count:
-                break
-        except Exception:
-            continue
+
+    # 1순위: FMP General News (Ultimate 플랜 — CNBC/Bloomberg 소스 포함)
+    if api_key:
+        for endpoint in [
+            "https://financialmodelingprep.com/stable/news/general",
+            "https://financialmodelingprep.com/api/v4/general_news",
+        ]:
+            try:
+                r = requests.get(
+                    endpoint,
+                    params={"limit": count, "apikey": api_key},
+                    timeout=15,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, list) and data:
+                        for item in data[:count]:
+                            title = clean(item.get("title", ""))
+                            desc = clean(item.get("text", "") or item.get("description", ""))
+                            site = item.get("site", "") or item.get("source", "")
+                            pub = item.get("publishedDate", "")[:16]
+                            if title:
+                                all_news.append({
+                                    "title": title,
+                                    "description": desc,
+                                    "publishedDate": pub,
+                                    "source": site,
+                                    "url": item.get("url", ""),
+                                })
+                        if all_news:
+                            break
+            except Exception:
+                continue
+
+    # 2순위: CNBC RSS (Markets + Economy)
+    if not all_news:
+        cnbc_feeds = [
+            ("https://www.cnbc.com/id/100003114/device/rss/rss.html", "CNBC Markets"),
+            ("https://www.cnbc.com/id/20910258/device/rss/rss.html", "CNBC Economy"),
+            ("https://www.cnbc.com/id/10000664/device/rss/rss.html", "CNBC World"),
+        ]
+        for url, source in cnbc_feeds:
+            try:
+                r = requests.get(url, timeout=15, headers=headers)
+                if r.status_code == 200:
+                    root = ET.fromstring(r.content)
+                    for item in root.findall(".//item"):
+                        title = clean(item.findtext("title", ""))
+                        desc = clean(item.findtext("description", ""))
+                        pub = item.findtext("pubDate", "")[:16]
+                        link = item.findtext("link", "")
+                        if title:
+                            all_news.append({
+                                "title": title,
+                                "description": desc,
+                                "publishedDate": pub,
+                                "source": source,
+                                "url": link,
+                            })
+                if len(all_news) >= count:
+                    break
+            except Exception:
+                continue
+
     return all_news[:count]
+
+
+# ── YouTube 자막 추출 ──────────────────────────────────────
+def fetch_youtube_transcript(url: str):
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        return None, "youtube-transcript-api 패키지를 설치해주세요."
+
+    match = re.search(r"(?:v=|youtu\.be/|embed/)([a-zA-Z0-9_-]{11})", url)
+    if not match:
+        return None, "유효하지 않은 YouTube URL입니다."
+
+    video_id = match.group(1)
+    try:
+        segments = YouTubeTranscriptApi.get_transcript(video_id, languages=["ko", "en", "en-US"])
+        text = " ".join([s["text"] for s in segments])
+        return text[:5000], None
+    except Exception as e:
+        return None, f"자막 추출 실패: {str(e)[:120]}"
 
 
 # ── FMP stable API: 종목 뉴스 수집 (Ultimate 플랜) ──────
@@ -545,18 +614,18 @@ def parse_script_response(text: str):
 
 
 # ── Claude: 평일 대본 생성 ───────────────────────────
-def generate_daily_script(news_data, earnings_data, user_comment, video_type, tone_style):
+def generate_daily_script(news_data, earnings_data, user_comment, video_type, tone_style, youtube_transcript=""):
     api_key = _secret("CLAUDE_API_KEY", "api_claude")
     if not api_key:
         return None, None, "Claude API 키가 설정되지 않았습니다."
 
     news_lines = "\n".join(
-        [f"• [{n.get('symbol','')}] {n.get('title','')}" for n in news_data[:7]]
+        [f"• [{n.get('symbol', n.get('source',''))}] {n.get('title','')}" for n in news_data[:10]]
     ) or "수집된 뉴스 없음"
 
     earnings_lines = "\n".join(
         [
-            f"• {e.get('symbol','')} — 발표일: {e.get('date','')}  EPS 예상: ${e.get('epsEstimated','N/A')}"
+            f"• {e.get('symbol','')} — 발표일: {e.get('date','')}  EPS 예상: {e.get('epsEstimated','N/A')}"
             for e in earnings_data[:5]
         ]
     ) or "어닝 일정 없음"
@@ -572,9 +641,16 @@ def generate_daily_script(news_data, earnings_data, user_comment, video_type, to
         "동기부여 멘토형": "따뜻하고 격려하는 톤으로",
     }
 
+    yt_section = ""
+    if youtube_transcript:
+        yt_section = f"""
+[참고 유튜브 영상 내용 — 아이디어만 참고하고 그대로 베끼지 말 것]
+{youtube_transcript[:2000]}
+"""
+
     prompt = f"""당신은 한국 주식 유튜브 채널 'Alphex Contento'의 AI 대본 작가입니다.
 
-[오늘의 미국 주식 뉴스]
+[오늘의 미국 시장 주요 뉴스]
 {news_lines}
 
 [오늘 어닝 발표 일정]
@@ -582,7 +658,7 @@ def generate_daily_script(news_data, earnings_data, user_comment, video_type, to
 
 [운영자 한마디]
 {user_comment if user_comment else "없음"}
-
+{yt_section}
 [영상 타입] {video_type} — {length_map.get(video_type, "")}
 [톤앤매너] {tone_style} — {tone_map.get(tone_style, "")}
 
@@ -596,7 +672,7 @@ def generate_daily_script(news_data, earnings_data, user_comment, video_type, to
 == 대본 ==
 [오프닝 — 시청자를 즉시 사로잡는 후킹 멘트]
 
-[뉴스 핵심 3가지 요약]
+[오늘의 핵심 시장 이슈 3가지]
 
 [어닝 발표 하이라이트]
 
@@ -992,18 +1068,29 @@ with tab_daily:
             if st.session_state.get(f"mn_{i}", False)
         ]
 
-        # ── B. 종목별 뉴스 ─────────────────────────────────
-        with st.expander(f"📊 종목별 뉴스 ({len(st.session_state.daily_news_data)}건)", expanded=False):
-            if st.session_state.daily_news_data:
-                for n in st.session_state.daily_news_data[:10]:
-                    st.markdown(
-                        f'<div style="color:#E6EDF3;font-size:12px;padding:5px 0;border-bottom:1px solid #21262D;">'
-                        f'<span style="color:#00E676;font-weight:600;">[{n.get("symbol","")}]</span> {n.get("title","")}'
-                        f'<span style="color:#30363D;font-size:10px;margin-left:8px;">{n.get("publishedDate","")[:10]}</span></div>',
-                        unsafe_allow_html=True,
-                    )
-            else:
-                st.caption("수집된 종목 뉴스가 없습니다.")
+        # ── B. 종목별 뉴스 (클릭해서 내용 읽기) ──────────
+        st.markdown(
+            f'<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">📊 종목별 뉴스 ({len(st.session_state.daily_news_data)}건) — 클릭해서 내용 확인</div>',
+            unsafe_allow_html=True,
+        )
+        if st.session_state.daily_news_data:
+            for i, n in enumerate(st.session_state.daily_news_data[:10]):
+                ticker_tag = n.get("symbol", "")
+                tickers_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+                is_relevant = any(t in n.get("title", "").upper() for t in tickers_list)
+                badge = ' <span style="background:#00E676;color:#0E1117;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;">AI 추천</span>' if is_relevant else ""
+                label = f"[{ticker_tag}] {n.get('title','')[:70]}{'...' if len(n.get('title',''))>70 else ''}"
+                with st.expander(label):
+                    if n.get("text") or n.get("description"):
+                        st.markdown(
+                            f'<div style="color:#C9D1D9;font-size:13px;line-height:1.7;">{n.get("text") or n.get("description","")}</div>',
+                            unsafe_allow_html=True,
+                        )
+                    st.caption(f"🕐 {n.get('publishedDate','')[:10]}  |  출처: {n.get('source','Yahoo Finance')}")
+                    if n.get("url"):
+                        st.markdown(f"[🔗 원문 보기]({n.get('url')})")
+        else:
+            st.caption("수집된 종목 뉴스가 없습니다.")
 
         # ── C. 어닝 캘린더 + 수동 입력 ────────────────────
         with st.expander("📅 어닝 컨퍼런스 콜 일정", expanded=True):
@@ -1029,6 +1116,38 @@ with tab_daily:
 
         # 선택 뉴스 session state 업데이트
         st.session_state.daily_selected_news = selected_market
+
+        # ── D. 참고 YouTube 영상 ────────────────────────────
+        st.markdown(
+            '<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">🎥 참고 YouTube 영상 (선택)</div>',
+            unsafe_allow_html=True,
+        )
+        info_box("다른 유튜버 영상 URL을 붙여넣으면 내용을 분석해서 나만의 대본에 참고합니다.", "#7B68EE")
+
+        yt_col1, yt_col2 = st.columns([5, 1])
+        with yt_col1:
+            yt_url = st.text_input(
+                "YouTube URL",
+                value=st.session_state.daily_youtube_url,
+                placeholder="https://www.youtube.com/watch?v=...",
+                label_visibility="collapsed",
+                key="yt_url_input",
+            )
+            st.session_state.daily_youtube_url = yt_url
+        with yt_col2:
+            if st.button("📥 분석", key="btn_yt_fetch"):
+                if yt_url:
+                    with st.spinner("자막 추출 중..."):
+                        transcript, err = fetch_youtube_transcript(yt_url)
+                    if err:
+                        st.error(f"❌ {err}")
+                    else:
+                        st.session_state.daily_youtube_transcript = transcript
+                        st.success("✅ 자막 추출 완료!")
+
+        if st.session_state.daily_youtube_transcript:
+            with st.expander("📝 추출된 자막 미리보기", expanded=False):
+                st.text(st.session_state.daily_youtube_transcript[:800] + "...")
 
     divider()
 
@@ -1081,6 +1200,7 @@ with tab_daily:
                     user_comment,
                     video_type,
                     tone_style,
+                    youtube_transcript=st.session_state.daily_youtube_transcript,
                 )
             if err:
                 st.error(f"❌ 대본 생성 실패: {err}")
