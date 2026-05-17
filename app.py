@@ -7,6 +7,7 @@ import streamlit as st
 import anthropic
 import requests
 import xml.etree.ElementTree as ET
+import re
 from datetime import datetime, timedelta
 import time
 
@@ -143,7 +144,10 @@ _defaults = {
     "daily_step": 1,
     "daily_news_done": False,
     "daily_news_data": [],
+    "daily_market_news": [],
     "daily_earnings_data": [],
+    "daily_manual_earning": "",
+    "daily_selected_news": [],
     "daily_script_done": False,
     "daily_script_text": "",
     "daily_titles": [],
@@ -275,7 +279,37 @@ def market_mode() -> tuple[str, str]:
 # 6. API 함수
 # ══════════════════════════════════════════════════════════
 
-# ── FMP stable API: 뉴스 수집 (Ultimate 플랜) ───────────
+# ── 미국 시장 전체 주요 이슈 뉴스 (RSS, 티커 무관) ──────
+def fetch_market_news(count: int = 8):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    def clean(text: str) -> str:
+        text = re.sub(r"<[^>]+>", " ", text or "")
+        return " ".join(text.split())[:200]
+
+    all_news = []
+    for url in [
+        "https://feeds.marketwatch.com/marketwatch/topstories/",
+        "https://finance.yahoo.com/rss/topfinstories",
+    ]:
+        try:
+            r = requests.get(url, timeout=15, headers=headers)
+            if r.status_code == 200:
+                root = ET.fromstring(r.content)
+                for item in root.findall(".//item"):
+                    title = clean(item.findtext("title", ""))
+                    desc = clean(item.findtext("description", "") or item.findtext("summary", ""))
+                    pub = item.findtext("pubDate", "")[:16]
+                    if title:
+                        all_news.append({"title": title, "description": desc, "publishedDate": pub})
+            if len(all_news) >= count:
+                break
+        except Exception:
+            continue
+    return all_news[:count]
+
+
+# ── FMP stable API: 종목 뉴스 수집 (Ultimate 플랜) ──────
 def _yahoo_news_fallback(tickers: list, count: int) -> list:
     all_news = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -917,47 +951,105 @@ with tab_daily:
             with st.spinner("미국 증시 데이터를 수집하는 중..."):
                 news_data, err = fetch_news(tickers, news_count)
                 earnings_data = fetch_earnings(tickers)
+                market_news = fetch_market_news(8)
 
             if err:
                 st.error(f"❌ 뉴스 수집 실패: {err}")
             else:
                 st.session_state.daily_news_data = news_data
                 st.session_state.daily_earnings_data = earnings_data
+                st.session_state.daily_market_news = market_news
+                st.session_state.daily_selected_news = []
                 st.session_state.daily_news_done = True
                 st.session_state.daily_step = max(st.session_state.daily_step, 2)
-                st.success(f"✅ 뉴스 {len(news_data)}건, 어닝 일정 {len(earnings_data)}건 수집 완료!")
+                st.success(f"✅ 시장 이슈 {len(market_news)}건, 종목 뉴스 {len(news_data)}건, 어닝 {len(earnings_data)}건 수집 완료!")
 
     if st.session_state.daily_news_done:
-        with st.expander("📋 수집된 데이터 미리보기", expanded=False):
-            news_html = "".join(
-                [
-                    f'<div style="color:#E6EDF3;font-size:12px;padding:6px 0;border-bottom:1px solid #21262D;">'
-                    f'<span style="color:#00E676;font-weight:600;">[{n.get("symbol","")}]</span> {n.get("title","")}'
-                    f'<span style="color:#30363D;font-size:10px;margin-left:8px;">{n.get("publishedDate","")[:10]}</span></div>'
-                    for n in st.session_state.daily_news_data[:7]
-                ]
-            ) or '<div style="color:#8B949E;">수집된 뉴스가 없습니다.</div>'
 
-            earnings_html = "".join(
-                [
-                    f'<div style="color:#E6EDF3;font-size:12px;padding:4px 0;">'
-                    f'<span style="color:#7B68EE;font-weight:600;">{e.get("symbol","")}</span>'
-                    f' — {e.get("date","")}  EPS 예상: <span style="color:#00E676;">${e.get("epsEstimated","N/A")}</span></div>'
-                    for e in st.session_state.daily_earnings_data
-                ]
-            ) or '<div style="color:#8B949E;">해당 종목의 어닝 일정이 없습니다.</div>'
+        # ── A. 미국 시장 이슈 뉴스 (선택) ─────────────────
+        st.markdown(
+            '<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">📈 미국 시장 주요 이슈 — 영상에 넣을 뉴스를 선택하세요</div>',
+            unsafe_allow_html=True,
+        )
+        if st.session_state.daily_market_news:
+            for i, news in enumerate(st.session_state.daily_market_news):
+                col_chk, col_txt = st.columns([1, 14])
+                with col_chk:
+                    st.checkbox("", key=f"mn_{i}", label_visibility="collapsed")
+                with col_txt:
+                    st.markdown(
+                        f'<div style="color:#E6EDF3;font-size:13px;font-weight:600;margin-top:4px;">{news["title"]}</div>'
+                        f'<div style="color:#8B949E;font-size:11px;margin-bottom:8px;">→ {news.get("description","")}</div>',
+                        unsafe_allow_html=True,
+                    )
+        else:
+            st.caption("시장 이슈 뉴스를 가져오지 못했습니다.")
 
-            card(
-                f'<div style="color:#00E676;font-weight:600;margin-bottom:10px;font-size:13px;">📰 오늘의 주요 뉴스</div>'
-                f"{news_html}"
-                f'<div style="color:#00E676;font-weight:600;margin:14px 0 10px;font-size:13px;">📅 어닝 컨퍼런스 콜 일정</div>'
-                f"{earnings_html}"
+        # 선택된 시장 뉴스 저장
+        selected_market = [
+            st.session_state.daily_market_news[i]
+            for i in range(len(st.session_state.daily_market_news))
+            if st.session_state.get(f"mn_{i}", False)
+        ]
+
+        # ── B. 종목별 뉴스 ─────────────────────────────────
+        with st.expander(f"📊 종목별 뉴스 ({len(st.session_state.daily_news_data)}건)", expanded=False):
+            if st.session_state.daily_news_data:
+                for n in st.session_state.daily_news_data[:10]:
+                    st.markdown(
+                        f'<div style="color:#E6EDF3;font-size:12px;padding:5px 0;border-bottom:1px solid #21262D;">'
+                        f'<span style="color:#00E676;font-weight:600;">[{n.get("symbol","")}]</span> {n.get("title","")}'
+                        f'<span style="color:#30363D;font-size:10px;margin-left:8px;">{n.get("publishedDate","")[:10]}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.caption("수집된 종목 뉴스가 없습니다.")
+
+        # ── C. 어닝 캘린더 + 수동 입력 ────────────────────
+        with st.expander("📅 어닝 컨퍼런스 콜 일정", expanded=True):
+            if st.session_state.daily_earnings_data:
+                for e in st.session_state.daily_earnings_data:
+                    st.markdown(
+                        f'<div style="color:#E6EDF3;font-size:12px;padding:4px 0;">'
+                        f'<span style="color:#7B68EE;font-weight:600;">{e.get("symbol","")}</span>'
+                        f' — {e.get("date","")}  EPS 예상: <span style="color:#00E676;">{e.get("epsEstimated","N/A")}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.caption("자동 조회된 어닝 일정이 없습니다. 아래에 직접 입력해주세요.")
+
+            manual = st.text_input(
+                "✏️ 어닝 일정 직접 입력",
+                value=st.session_state.daily_manual_earning,
+                placeholder="예: ELF 2026-05-20, NVDA 2026-05-28",
+                help="자동 조회가 안 될 때 직접 입력하세요",
+                key="manual_earning_input",
             )
+            st.session_state.daily_manual_earning = manual
+
+        # 선택 뉴스 session state 업데이트
+        st.session_state.daily_selected_news = selected_market
 
     divider()
 
     # ── STEP 2 · AI 대본 생성 ─────────────────────────────
     section_header(2, "AI 도파민 대본 생성", active=st.session_state.daily_step >= 2)
+
+    # 선택된 뉴스 미리보기 (내 생각 입력 전 참고)
+    if st.session_state.daily_news_done and st.session_state.daily_selected_news:
+        st.markdown(
+            '<div style="color:#8B949E;font-size:12px;margin-bottom:4px;">✅ 선택된 영상 소재 (이 내용으로 대본이 만들어집니다)</div>',
+            unsafe_allow_html=True,
+        )
+        for n in st.session_state.daily_selected_news:
+            st.markdown(
+                f'<div style="background:#161B22;border-left:3px solid #00E676;border-radius:6px;'
+                f'padding:8px 12px;margin:4px 0;font-size:12px;color:#E6EDF3;">{n["title"]}</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown("<br>", unsafe_allow_html=True)
+    elif st.session_state.daily_news_done:
+        info_box("💡 위에서 영상에 넣을 시장 이슈 뉴스를 선택하면, 어떤 내용인지 확인 후 내 생각을 입력할 수 있습니다.", "#FFA726")
 
     user_comment = st.text_area(
         "✍️ 내 생각 한 줄 코멘트 (선택)",
@@ -975,10 +1067,17 @@ with tab_daily:
         if not st.session_state.daily_news_done:
             st.warning("⚠️ Step 1 데이터 수집을 먼저 완료해주세요.")
         else:
+            # 선택된 시장 뉴스 + 종목 뉴스 합산
+            all_news = st.session_state.daily_selected_news + st.session_state.daily_news_data
+            # 수동 입력 어닝 추가
+            earnings = list(st.session_state.daily_earnings_data)
+            if st.session_state.daily_manual_earning.strip():
+                earnings.append({"symbol": "수동입력", "date": st.session_state.daily_manual_earning, "epsEstimated": "N/A"})
+
             with st.spinner("Claude AI가 후킹 대본을 작성 중... (30초~1분 소요)"):
                 titles, script, err = generate_daily_script(
-                    st.session_state.daily_news_data,
-                    st.session_state.daily_earnings_data,
+                    all_news,
+                    earnings,
                     user_comment,
                     video_type,
                     tone_style,
