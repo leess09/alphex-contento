@@ -145,6 +145,7 @@ _defaults = {
     "daily_news_done": False,
     "daily_news_data": [],
     "daily_market_news": [],
+    "daily_market_query": "",
     "daily_earnings_data": [],
     "daily_manual_earning": "",
     "daily_selected_news": [],
@@ -281,57 +282,57 @@ def market_mode() -> tuple[str, str]:
 # 6. API 함수
 # ══════════════════════════════════════════════════════════
 
-# ── 미국 시장 주요 이슈 뉴스 (CNBC RSS + FMP) ───────────
-def fetch_market_news(count: int = 10):
+# ── 시장 이슈 키워드 검색 (FMP General News + CNBC RSS) ──
+def fetch_market_news(query: str = "", count: int = 10):
     api_key = _secret("FMP_API_KEY", "api_fmp")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     def clean(text: str) -> str:
         text = re.sub(r"<[^>]+>", " ", text or "")
-        return " ".join(text.split())[:250]
+        return " ".join(text.split())
 
-    all_news = []
+    results = []
 
-    # 1순위: FMP General News (Ultimate 플랜 — CNBC/Bloomberg 소스 포함)
+    # 1순위: FMP General News — 키워드 검색 (CNBC·Bloomberg·Reuters 소스 포함)
     if api_key:
         for endpoint in [
             "https://financialmodelingprep.com/stable/news/general",
             "https://financialmodelingprep.com/api/v4/general_news",
         ]:
             try:
-                r = requests.get(
-                    endpoint,
-                    params={"limit": count, "apikey": api_key},
-                    timeout=15,
-                )
+                params = {"limit": count, "apikey": api_key}
+                if query:
+                    params["query"] = query
+                r = requests.get(endpoint, params=params, timeout=15)
                 if r.status_code == 200:
                     data = r.json()
                     if isinstance(data, list) and data:
                         for item in data[:count]:
                             title = clean(item.get("title", ""))
-                            desc = clean(item.get("text", "") or item.get("description", ""))
-                            site = item.get("site", "") or item.get("source", "")
+                            body = clean(item.get("text", "") or item.get("description", ""))
                             pub = item.get("publishedDate", "")[:16]
+                            source = item.get("site", "") or item.get("source", "")
                             if title:
-                                all_news.append({
+                                results.append({
                                     "title": title,
-                                    "description": desc,
+                                    "text": body,
                                     "publishedDate": pub,
-                                    "source": site,
+                                    "source": source,
                                     "url": item.get("url", ""),
                                 })
-                        if all_news:
+                        if results:
                             break
             except Exception:
                 continue
 
-    # 2순위: CNBC RSS (Markets + Economy)
-    if not all_news:
+    # 2순위: CNBC RSS — 키워드로 필터링
+    if not results:
         cnbc_feeds = [
             ("https://www.cnbc.com/id/100003114/device/rss/rss.html", "CNBC Markets"),
             ("https://www.cnbc.com/id/20910258/device/rss/rss.html", "CNBC Economy"),
             ("https://www.cnbc.com/id/10000664/device/rss/rss.html", "CNBC World"),
         ]
+        raw = []
         for url, source in cnbc_feeds:
             try:
                 r = requests.get(url, timeout=15, headers=headers)
@@ -343,19 +344,23 @@ def fetch_market_news(count: int = 10):
                         pub = item.findtext("pubDate", "")[:16]
                         link = item.findtext("link", "")
                         if title:
-                            all_news.append({
+                            raw.append({
                                 "title": title,
-                                "description": desc,
+                                "text": desc,
                                 "publishedDate": pub,
                                 "source": source,
                                 "url": link,
                             })
-                if len(all_news) >= count:
-                    break
             except Exception:
                 continue
 
-    return all_news[:count]
+        if query:
+            kw = query.lower()
+            results = [n for n in raw if kw in n["title"].lower() or kw in n["text"].lower()]
+        else:
+            results = raw
+
+    return results[:count]
 
 
 # ── YouTube 자막 추출 ──────────────────────────────────────
@@ -1027,39 +1032,67 @@ with tab_daily:
             with st.spinner("미국 증시 데이터를 수집하는 중..."):
                 news_data, err = fetch_news(tickers, news_count)
                 earnings_data = fetch_earnings(tickers)
-                market_news = fetch_market_news(8)
 
             if err:
                 st.error(f"❌ 뉴스 수집 실패: {err}")
             else:
                 st.session_state.daily_news_data = news_data
                 st.session_state.daily_earnings_data = earnings_data
-                st.session_state.daily_market_news = market_news
                 st.session_state.daily_selected_news = []
                 st.session_state.daily_news_done = True
                 st.session_state.daily_step = max(st.session_state.daily_step, 2)
-                st.success(f"✅ 시장 이슈 {len(market_news)}건, 종목 뉴스 {len(news_data)}건, 어닝 {len(earnings_data)}건 수집 완료!")
+                st.success(f"✅ 종목 뉴스 {len(news_data)}건, 어닝 {len(earnings_data)}건 수집 완료!")
 
     if st.session_state.daily_news_done:
 
-        # ── A. 미국 시장 이슈 뉴스 (선택) ─────────────────
+        # ── A. 미국 시장 이슈 검색 ────────────────────────
         st.markdown(
-            '<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">📈 미국 시장 주요 이슈 — 영상에 넣을 뉴스를 선택하세요</div>',
+            '<div style="color:#00E676;font-weight:700;font-size:14px;margin:18px 0 6px;">📈 미국 시장 이슈 검색</div>',
             unsafe_allow_html=True,
         )
+        mkt_col1, mkt_col2 = st.columns([5, 1])
+        with mkt_col1:
+            mkt_query = st.text_input(
+                "시장 이슈 검색",
+                value=st.session_state.daily_market_query,
+                placeholder="예: oil price, Fed rate hike, AI stocks, China tariff ...",
+                label_visibility="collapsed",
+                key="mkt_query_input",
+            )
+        with mkt_col2:
+            search_clicked = st.button("🔍 검색", key="btn_mkt_search")
+
+        if search_clicked and mkt_query.strip():
+            st.session_state.daily_market_query = mkt_query
+            with st.spinner(f"'{mkt_query}' 관련 뉴스를 검색 중..."):
+                st.session_state.daily_market_news = fetch_market_news(mkt_query, 10)
+                st.session_state.daily_selected_news = []
+            if st.session_state.daily_market_news:
+                st.success(f"✅ {len(st.session_state.daily_market_news)}건 검색 완료!")
+            else:
+                st.warning("관련 뉴스를 찾지 못했습니다. 다른 키워드로 검색해보세요.")
+
         if st.session_state.daily_market_news:
+            st.markdown(
+                f'<div style="color:#8B949E;font-size:11px;margin-bottom:8px;">검색어: <b style="color:#00E676;">{st.session_state.daily_market_query}</b> — 영상에 넣을 뉴스를 선택하세요</div>',
+                unsafe_allow_html=True,
+            )
             for i, news in enumerate(st.session_state.daily_market_news):
-                col_chk, col_txt = st.columns([1, 14])
-                with col_chk:
+                chk_col, content_col = st.columns([1, 14])
+                with chk_col:
                     st.checkbox("", key=f"mn_{i}", label_visibility="collapsed")
-                with col_txt:
-                    st.markdown(
-                        f'<div style="color:#E6EDF3;font-size:13px;font-weight:600;margin-top:4px;">{news["title"]}</div>'
-                        f'<div style="color:#8B949E;font-size:11px;margin-bottom:8px;">→ {news.get("description","")}</div>',
-                        unsafe_allow_html=True,
-                    )
-        else:
-            st.caption("시장 이슈 뉴스를 가져오지 못했습니다.")
+                with content_col:
+                    pub = news.get("publishedDate", "")[:10]
+                    source = news.get("source", "")
+                    label = f"{news['title'][:75]}{'...' if len(news['title'])>75 else ''}"
+                    with st.expander(label):
+                        st.markdown(
+                            f'<div style="color:#C9D1D9;font-size:13px;line-height:1.7;">{news.get("text","내용 없음")}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.caption(f"🕐 {pub}  |  출처: {source}")
+                        if news.get("url"):
+                            st.markdown(f"[🔗 원문 보기]({news.get('url')})")
 
         # 선택된 시장 뉴스 저장
         selected_market = [
