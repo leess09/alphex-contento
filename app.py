@@ -6,6 +6,7 @@ Streamlit 메인 대시보드
 import streamlit as st
 import anthropic
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime
 import time
 
@@ -274,67 +275,92 @@ def market_mode() -> tuple[str, str]:
 # 6. API 함수
 # ══════════════════════════════════════════════════════════
 
-# ── FMP: 뉴스 수집 ──────────────────────────────────────
+# ── Yahoo Finance RSS: 뉴스 수집 (무료, API 키 불필요) ──
 def fetch_news(tickers_str: str, count: int):
-    api_key = _secret("FMP_API_KEY", "api_fmp")
-    if not api_key:
-        return [], "FMP API 키가 설정되지 않았습니다."
-    tickers = ",".join([t.strip().upper() for t in tickers_str.split(",") if t.strip()])
-    params = {"tickers": tickers, "limit": count, "apikey": api_key}
-    try:
-        r = requests.get(
-            "https://financialmodelingprep.com/api/v3/stock_news",
-            params=params,
-            timeout=15,
-        )
-        if r.status_code == 200:
-            return r.json(), None
-        return [], f"FMP 오류 ({r.status_code}): {r.text[:200]}"
-    except Exception as e:
-        return [], str(e)
-
-
-# ── FMP: 어닝 캘린더 ──────────────────────────────────
-def fetch_earnings(tickers_str: str):
-    api_key = _secret("FMP_API_KEY", "api_fmp")
-    if not api_key:
-        return []
     tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
-    try:
-        r = requests.get(
-            "https://financialmodelingprep.com/api/v3/earning_calendar",
-            params={"apikey": api_key},
-            timeout=15,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            if tickers:
-                data = [e for e in data if e.get("symbol") in tickers]
-            return data[:10]
-    except Exception:
-        pass
-    return []
+    if not tickers:
+        return [], "티커를 입력해주세요."
+
+    all_news = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    for ticker in tickers[:5]:
+        url = f"https://finance.yahoo.com/rss/headline?s={ticker}"
+        try:
+            r = requests.get(url, timeout=15, headers=headers)
+            if r.status_code == 200:
+                root = ET.fromstring(r.content)
+                for item in root.findall(".//item")[:count]:
+                    title = item.findtext("title", "")
+                    pub_date = item.findtext("pubDate", "")[:22]
+                    description = item.findtext("description", "")
+                    all_news.append({
+                        "symbol": ticker,
+                        "title": title,
+                        "publishedDate": pub_date,
+                        "text": description,
+                    })
+        except Exception:
+            continue
+
+    if not all_news:
+        return [], "뉴스를 가져오지 못했습니다. 티커를 다시 확인해주세요."
+
+    return all_news[:count], None
 
 
-# ── FMP: 주간 지수 데이터 ─────────────────────────────
+# ── Yahoo Finance: 어닝 캘린더 ────────────────────────
+def fetch_earnings(tickers_str: str):
+    tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+    result = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    for ticker in tickers[:5]:
+        try:
+            r = requests.get(
+                f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}",
+                params={"modules": "calendarEvents"},
+                headers=headers,
+                timeout=10,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                events = (
+                    data.get("quoteSummary", {})
+                    .get("result", [{}])[0]
+                    .get("calendarEvents", {})
+                    .get("earnings", {})
+                )
+                dates = events.get("earningsDate", [])
+                if dates:
+                    date_str = datetime.fromtimestamp(dates[0].get("raw", 0)).strftime("%Y-%m-%d")
+                    result.append({
+                        "symbol": ticker,
+                        "date": date_str,
+                        "epsEstimated": events.get("epsEstimate", {}).get("fmt", "N/A"),
+                    })
+        except Exception:
+            continue
+    return result
+
+
+# ── Yahoo Finance: 주간 지수 데이터 ───────────────────
 def fetch_market_indices():
-    api_key = _secret("FMP_API_KEY", "api_fmp")
-    if not api_key:
-        return {}
     symbols = {"S&P 500": "%5EGSPC", "NASDAQ": "%5EIXIC", "DOW": "%5EDJI", "VIX": "%5EVIX"}
     result = {}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     for name, sym in symbols.items():
         try:
             r = requests.get(
-                f"https://financialmodelingprep.com/api/v3/quote/{sym}",
-                params={"apikey": api_key},
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                params={"interval": "1d", "range": "1d"},
+                headers=headers,
                 timeout=10,
             )
-            if r.status_code == 200 and r.json():
-                d = r.json()[0]
+            if r.status_code == 200:
+                meta = r.json()["chart"]["result"][0]["meta"]
                 result[name] = {
-                    "price": d.get("price", 0),
-                    "change": d.get("changesPercentage", 0),
+                    "price": meta.get("regularMarketPrice", 0),
+                    "change": meta.get("regularMarketChangePercent", 0),
                 }
         except Exception:
             pass
